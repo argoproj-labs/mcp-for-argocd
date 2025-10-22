@@ -6,7 +6,8 @@ import {
   V1EventList,
   V1alpha1ResourceAction,
   V1alpha1ResourceDiff,
-  V1alpha1ResourceResult
+  V1alpha1ResourceResult,
+  V1alpha1ApplicationResourceResult
 } from '../types/argocd-types.js';
 import { HttpClient } from './http.js';
 
@@ -236,6 +237,25 @@ export class ArgoCDClient {
       `/api/v1/applications/${applicationName}/events`
     );
     return body;
+  }
+
+  public async getResource(
+    applicationName: string,
+    applicationNamespace: string,
+    resourceRef: V1alpha1ResourceResult
+  ) {
+    const { body } = await this.client.get<V1alpha1ApplicationResourceResult>(
+      `/api/v1/applications/${applicationName}/resource`,
+      {
+        appNamespace: applicationNamespace,
+        namespace: resourceRef.namespace,
+        resourceName: resourceRef.name,
+        group: resourceRef.group,
+        kind: resourceRef.kind,
+        version: resourceRef.version
+      }
+    );
+    return body.manifest;
   }
 
   public async getResourceEvents(

@@ -10,3 +10,4 @@ export type V1EventList = ArgoCD.V1EventList;
 export type V1alpha1ResourceAction = ArgoCD.V1alpha1ResourceAction;
 export type V1alpha1ResourceDiff = ArgoCD.V1alpha1ResourceDiff;
 export type V1alpha1ResourceResult = ArgoCD.V1alpha1ResourceResult;
+export type V1alpha1ApplicationResourceResult = ArgoCD.ApplicationApplicationResourceResponse;
