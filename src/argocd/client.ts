@@ -145,7 +145,8 @@ export class ArgoCDClient {
   public async getWorkloadLogs(
     applicationName: string,
     applicationNamespace: string,
-    resourceRef: V1alpha1ResourceResult
+    resourceRef: V1alpha1ResourceResult,
+    container: string
   ) {
     const logs: ApplicationLogEntry[] = [];
     await this.client.getStream<ApplicationLogEntry>(
@@ -158,7 +159,8 @@ export class ArgoCDClient {
         kind: resourceRef.kind,
         version: resourceRef.version,
         follow: false,
-        tailLines: 100
+        tailLines: 100,
+        container: container
       },
       (chunk) => logs.push(chunk)
     );
