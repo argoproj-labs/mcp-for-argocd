@@ -24,13 +24,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install
       - name: Lint
-        run:
-          pnpm run lint
+        run: pnpm run lint
       - name: Release
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true
         run: |
           echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > .npmrc
           VERSION=${GITHUB_REF#refs/tags/v}
-          npm version $VERSION --no-git-tag-version
-          npm publish --provenance --access public
+          pnpm run build
+          pnpm version $VERSION --no-git-tag-version
+          pnpm publish --access public
