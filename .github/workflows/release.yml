@@ -34,4 +34,4 @@ jobs:
           VERSION=${GITHUB_REF#refs/tags/v}
           pnpm run build
           pnpm version $VERSION --no-git-tag-version
-          pnpm publish --access public
+          pnpm publish --access public --no-git-checks
