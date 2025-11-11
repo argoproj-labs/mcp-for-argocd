@@ -7,7 +7,8 @@ import {
   V1alpha1ResourceAction,
   V1alpha1ResourceDiff,
   V1alpha1ResourceResult,
-  V1alpha1ApplicationResourceResult
+  V1alpha1ApplicationResourceResult,
+  V1alpha1ClusterList
 } from '../types/argocd-types.js';
 import { HttpClient } from './http.js';
 
@@ -63,6 +64,19 @@ export class ArgoCDClient {
         hasMore: end < strippedItems.length
       }
     };
+  }
+
+  public async listClusters(params?: { server?: string; name?: string }) {
+    const queryParams: Record<string, string> = {};
+    if (params?.server) queryParams.server = params.server;
+    if (params?.name) queryParams.name = params.name;
+
+    const { body } = await this.client.get<V1alpha1ClusterList>(
+      `/api/v1/clusters`,
+      Object.keys(queryParams).length > 0 ? queryParams : undefined
+    );
+
+    return body;
   }
 
   public async getApplication(applicationName: string, appNamespace?: string) {

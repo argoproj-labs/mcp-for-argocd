@@ -66,6 +66,25 @@ export class Server extends McpServer {
         })
     );
     this.addJsonOutputTool(
+      'list_clusters',
+      'list_clusters returns list of clusters registered with ArgoCD',
+      {
+        server: z
+          .string()
+          .optional()
+          .describe('Filter clusters by server URL. Optional.'),
+        name: z
+          .string()
+          .optional()
+          .describe('Filter clusters by name. Optional.')
+      },
+      async ({ server, name }) =>
+        await this.argocdClient.listClusters({
+          server: server ?? undefined,
+          name: name ?? undefined
+        })
+    );
+    this.addJsonOutputTool(
       'get_application',
       'get_application returns application by application name. Optionally specify the application namespace to get applications from non-default namespaces.',
       {

@@ -37,6 +37,9 @@ const urlForGithub = `https://insiders.vscode.dev/redirect?url=${encodeURICompon
 
 The server provides the following ArgoCD management tools:
 
+### Cluster Management
+- `list_clusters`: List all clusters registered with ArgoCD
+
 ### Application Management
 - `list_applications`: List and filter all applications
 - `get_application`: Get detailed information about a specific application
