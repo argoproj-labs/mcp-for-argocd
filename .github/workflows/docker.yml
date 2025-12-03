@@ -8,8 +8,10 @@ on:
     types: [published]
 
 env:
-  REGISTRY: ghcr.io
+  GHCR_REGISTRY: ghcr.io
+  QUAY_REGISTRY: quay.io
   IMAGE_NAME: ${{ github.repository }}
+  QUAY_IMAGE_NAME: argoprojlabs/mcp-for-argocd
 
 jobs:
   build-and-push-image:
@@ -36,18 +38,27 @@ jobs:
               }
             }
 
-      - name: Log in to the Container registry
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Quay.io
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ${{ env.QUAY_REGISTRY }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
 
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: |
+            ${{ env.GHCR_REGISTRY }}/${{ env.IMAGE_NAME }}
+            ${{ env.QUAY_REGISTRY }}/${{ env.QUAY_IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable=${{ github.event_name == 'push' }}
             type=ref,event=tag
