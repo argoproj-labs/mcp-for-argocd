@@ -67,13 +67,26 @@ export class Server extends McpServer {
     );
     this.addJsonOutputTool(
       'get_application',
-      'get_application returns application by application name. Optionally specify the application namespace to get applications from non-default namespaces.',
+      'get_application returns application by application name. Optionally specify the application namespace to get applications from non-default namespaces. Use refresh parameter to force ArgoCD to refresh the application state from the source repository.',
       {
         applicationName: z.string(),
-        applicationNamespace: ApplicationNamespaceSchema.optional()
+        applicationNamespace: ApplicationNamespaceSchema.optional(),
+        refresh: z
+          .enum(['normal', 'hard'])
+          .optional()
+          .describe(
+            'Refresh the application state. "normal" refreshes from cache, "hard" forces a refresh from the git repository.'
+          )
       },
-      async ({ applicationName, applicationNamespace }) =>
-        await this.argocdClient.getApplication(applicationName, applicationNamespace)
+      async ({ applicationName, applicationNamespace, refresh }) => {
+        const options: { appNamespace?: string; refresh?: 'normal' | 'hard' } = {};
+        if (applicationNamespace) options.appNamespace = applicationNamespace;
+        if (refresh) options.refresh = refresh;
+        return await this.argocdClient.getApplication(
+          applicationName,
+          Object.keys(options).length > 0 ? options : undefined
+        );
+      }
     );
     this.addJsonOutputTool(
       'get_application_resource_tree',

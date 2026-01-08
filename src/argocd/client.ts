@@ -65,11 +65,23 @@ export class ArgoCDClient {
     };
   }
 
-  public async getApplication(applicationName: string, appNamespace?: string) {
-    const queryParams = appNamespace ? { appNamespace } : undefined;
+  public async getApplication(
+    applicationName: string,
+    options?: {
+      appNamespace?: string;
+      refresh?: 'normal' | 'hard';
+    }
+  ) {
+    const queryParams: Record<string, string> = {};
+    if (options?.appNamespace) {
+      queryParams.appNamespace = options.appNamespace;
+    }
+    if (options?.refresh) {
+      queryParams.refresh = options.refresh;
+    }
     const { body } = await this.client.get<V1alpha1Application>(
       `/api/v1/applications/${applicationName}`,
-      queryParams
+      Object.keys(queryParams).length > 0 ? queryParams : undefined
     );
     return body;
   }
