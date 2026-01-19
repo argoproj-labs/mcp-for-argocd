@@ -3,17 +3,23 @@ import express from 'express';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { logger } from '../logging/logging.js';
 import { createServer } from './server.js';
+import { parseArgoCDConfig, ArgoCDConfig } from '../config/index.js';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 
 export const connectStdioTransport = () => {
-  const server = createServer({
-    argocdBaseUrl: process.env.ARGOCD_BASE_URL || '',
-    argocdApiToken: process.env.ARGOCD_API_TOKEN || ''
-  });
+  const configJson = process.env.ARGOCD_CONFIG_JSON;
+  const argocdConfig = parseArgoCDConfig(
+    process.env.ARGOCD_BASE_URL,
+    process.env.ARGOCD_API_TOKEN,
+    configJson
+  );
+
+  const server = createServer({ argocdConfig });
 
   logger.info('Connecting to stdio transport');
+  logger.info(`Configured ArgoCD instances: ${argocdConfig.instances.map(i => i.id).join(', ')}`);
   server.connect(new StdioServerTransport());
 };
 
@@ -22,10 +28,14 @@ export const connectSSETransport = (port: number) => {
   const transports: { [sessionId: string]: SSEServerTransport } = {};
 
   app.get('/sse', async (req, res) => {
-    const server = createServer({
-      argocdBaseUrl: (req.headers['x-argocd-base-url'] as string) || '',
-      argocdApiToken: (req.headers['x-argocd-api-token'] as string) || ''
-    });
+    const configJson = req.headers['x-argocd-config-json'] as string | undefined;
+    const argocdConfig = parseArgoCDConfig(
+      req.headers['x-argocd-base-url'] as string,
+      req.headers['x-argocd-api-token'] as string,
+      configJson
+    );
+
+    const server = createServer({ argocdConfig });
 
     const transport = new SSEServerTransport('/messages', res);
     transports[transport.sessionId] = transport;
@@ -62,15 +72,19 @@ export const connectHttpTransport = (port: number) => {
     if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
       transport = httpTransports[sessionIdFromHeader];
     } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
+      const configJson = req.headers['x-argocd-config-json'] as string | undefined;
       const argocdBaseUrl =
-        (req.headers['x-argocd-base-url'] as string) || process.env.ARGOCD_BASE_URL || '';
+        (req.headers['x-argocd-base-url'] as string) || process.env.ARGOCD_BASE_URL;
       const argocdApiToken =
-        (req.headers['x-argocd-api-token'] as string) || process.env.ARGOCD_API_TOKEN || '';
+        (req.headers['x-argocd-api-token'] as string) || process.env.ARGOCD_API_TOKEN;
 
-      if (argocdBaseUrl == '' || argocdApiToken == '') {
+      let argocdConfig: ArgoCDConfig;
+      try {
+        argocdConfig = parseArgoCDConfig(argocdBaseUrl, argocdApiToken, configJson);
+      } catch (error) {
         res
           .status(400)
-          .send('x-argocd-base-url and x-argocd-api-token must be provided in headers.');
+          .send(`Configuration error: ${error instanceof Error ? error.message : String(error)}`);
         return;
       }
 
@@ -87,10 +101,7 @@ export const connectHttpTransport = (port: number) => {
         }
       };
 
-      const server = createServer({
-        argocdBaseUrl,
-        argocdApiToken
-      });
+      const server = createServer({ argocdConfig });
 
       await server.connect(transport);
     } else {
