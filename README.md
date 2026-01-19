@@ -53,6 +53,9 @@ The server provides the following ArgoCD management tools:
 - `get_resource_actions`: Get available actions for resources
 - `run_resource_action`: Run an action on a resource
 
+### Instance Management
+- `list_argocd_instances`: List all configured ArgoCD instances and the default instance ID
+
 ## Installation
 
 ### Prerequisites
@@ -158,6 +161,92 @@ This will disable the following tools:
 - `run_resource_action`
 
 By default, all the tools will be available.
+
+### Multiple ArgoCD Instances
+
+The MCP server supports managing multiple ArgoCD instances simultaneously. You can configure multiple instances in two ways:
+
+#### Option 1: Environment Variable (Recommended)
+
+Set the `ARGOCD_CONFIG_JSON` environment variable with a JSON configuration:
+
+```json
+{
+  "instances": [
+    {
+      "id": "prod",
+      "baseUrl": "https://argocd-prod.example.com",
+      "apiToken": "prod-token",
+      "description": "Production ArgoCD"
+    },
+    {
+      "id": "staging",
+      "baseUrl": "https://argocd-staging.example.com",
+      "apiToken": "staging-token",
+      "description": "Staging ArgoCD"
+    }
+  ],
+  "defaultInstanceId": "prod"
+}
+```
+
+**Cursor configuration example:**
+```json
+{
+  "mcpServers": {
+    "argocd-mcp": {
+      "command": "npx",
+      "args": ["argocd-mcp@latest", "stdio"],
+      "env": {
+        "ARGOCD_CONFIG_JSON": "{\"instances\":[{\"id\":\"prod\",\"baseUrl\":\"https://argocd-prod.example.com\",\"apiToken\":\"prod-token\"},{\"id\":\"staging\",\"baseUrl\":\"https://argocd-staging.example.com\",\"apiToken\":\"staging-token\"}],\"defaultInstanceId\":\"prod\"}"
+      }
+    }
+  }
+}
+```
+
+#### Option 2: HTTP Header (SSE/HTTP transports only)
+
+Pass the configuration as `x-argocd-config-json` header when connecting.
+
+#### Using Instance IDs in Tool Calls
+
+When multiple instances are configured, you can specify which instance to use via the `argocdInstanceId` parameter in any tool call:
+
+```typescript
+// List applications from production ArgoCD
+await client.call('list_applications', {
+  argocdInstanceId: 'prod'
+});
+
+// Get application from staging ArgoCD
+await client.call('get_application', {
+  argocdInstanceId: 'staging',
+  applicationName: 'my-app'
+});
+```
+
+If `argocdInstanceId` is not specified, the default instance will be used.
+
+#### Backward Compatibility
+
+The server maintains full backward compatibility. If you don't provide `ARGOCD_CONFIG_JSON`, the server will use `ARGOCD_BASE_URL` and `ARGOCD_API_TOKEN` environment variables to create a single default instance.
+
+**Single instance configuration (still works):**
+```json
+{
+  "mcpServers": {
+    "argocd-mcp": {
+      "command": "npx",
+      "args": ["argocd-mcp@latest", "stdio"],
+      "env": {
+        "ARGOCD_BASE_URL": "<argocd_url>",
+        "ARGOCD_API_TOKEN": "<argocd_token>"
+      }
+    }
+  }
+}
+```
 
 ## For Development
 
