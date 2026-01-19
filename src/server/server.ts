@@ -325,6 +325,17 @@ export class Server extends McpServer {
         );
       }
     );
+    this.addJsonOutputTool(
+      'list_argocd_instances',
+      'list_argocd_instances returns all configured ArgoCD instances that can be targeted with the argocdInstanceId parameter.',
+      {},
+      async () => {
+        return {
+          instances: Array.from(this.argocdClients.keys()).map(id => ({ id })),
+          defaultInstanceId: this.defaultInstanceId
+        };
+      }
+    );
 
     // Only register modification tools if not in read-only mode
     if (!isReadOnly) {
@@ -492,17 +503,6 @@ export class Server extends McpServer {
     }
 
     return client;
-  }
-
-  /**
-   * List available ArgoCD instances
-   */
-  private listInstances(): Array<{ id: string }> {
-    const result: Array<{ id: string }> = [];
-    for (const [id] of this.argocdClients) {
-      result.push({ id });
-    }
-    return result;
   }
 
   private addJsonOutputTool<Args extends ZodRawShape, T>(
