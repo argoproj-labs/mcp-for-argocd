@@ -2,6 +2,7 @@ import { McpServer, ToolCallback } from '@modelcontextprotocol/sdk/server/mcp.js
 
 import packageJSON from '../../package.json' with { type: 'json' };
 import { ArgoCDClient } from '../argocd/client.js';
+import { ArgoCDConfig } from '../config/index.js';
 import { z, ZodRawShape } from 'zod';
 import { V1alpha1Application, V1alpha1ResourceResult } from '../types/argocd-types.js';
 import {
@@ -11,19 +12,31 @@ import {
 } from '../shared/models/schema.js';
 
 type ServerInfo = {
-  argocdBaseUrl: string;
-  argocdApiToken: string;
+  argocdConfig: ArgoCDConfig;
 };
 
 export class Server extends McpServer {
-  private argocdClient: ArgoCDClient;
+  private argocdClients: Map<string, ArgoCDClient>;
+  private defaultInstanceId: string;
 
   constructor(serverInfo: ServerInfo) {
     super({
       name: packageJSON.name,
       version: packageJSON.version
     });
-    this.argocdClient = new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
+
+    // Initialize client registry
+    this.argocdClients = new Map();
+    this.defaultInstanceId =
+      serverInfo.argocdConfig.defaultInstanceId || serverInfo.argocdConfig.instances[0].id;
+
+    // Create a client for each configured instance
+    for (const instance of serverInfo.argocdConfig.instances) {
+      this.argocdClients.set(
+        instance.id,
+        new ArgoCDClient(instance.baseUrl, instance.apiToken)
+      );
+    }
 
     const isReadOnly =
       String(process.env.MCP_READ_ONLY ?? '')
@@ -345,6 +358,33 @@ export class Server extends McpServer {
           )
       );
     }
+  }
+
+  /**
+   * Get ArgoCD client by instance ID, falling back to default
+   */
+  private getClient(instanceId?: string): ArgoCDClient {
+    const targetId = instanceId || this.defaultInstanceId;
+    const client = this.argocdClients.get(targetId);
+
+    if (!client) {
+      throw new Error(
+        `ArgoCD instance '${targetId}' not found. Available instances: ${Array.from(this.argocdClients.keys()).join(', ')}`
+      );
+    }
+
+    return client;
+  }
+
+  /**
+   * List available ArgoCD instances
+   */
+  private listInstances(): Array<{ id: string }> {
+    const result: Array<{ id: string }> = [];
+    for (const [id] of this.argocdClients) {
+      result.push({ id });
+    }
+    return result;
   }
 
   private addJsonOutputTool<Args extends ZodRawShape, T>(
