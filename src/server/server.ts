@@ -48,6 +48,12 @@ export class Server extends McpServer {
       'list_applications',
       'list_applications returns list of applications. Use the filter parameters to narrow down results.',
       {
+        argocdInstanceId: z
+          .string()
+          .optional()
+          .describe(
+            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
+          ),
         name: z
           .string()
           .optional()
@@ -83,8 +89,9 @@ export class Server extends McpServer {
             'Number of applications to skip before returning results. Use with limit for pagination. Optional.'
           )
       },
-      async ({ name, project, repo, selector, appNamespace, limit, offset }) =>
-        await this.argocdClient.listApplications({
+      async ({ argocdInstanceId, name, project, repo, selector, appNamespace, limit, offset }) => {
+        const client = this.getClient(argocdInstanceId);
+        return await client.listApplications({
           name,
           project,
           repo,
@@ -92,12 +99,19 @@ export class Server extends McpServer {
           appNamespace,
           limit,
           offset
-        })
+        });
+      }
     );
     this.addJsonOutputTool(
       'get_application',
       'get_application returns application by application name. Optionally specify the application namespace to get applications from non-default namespaces. Use refresh parameter to force ArgoCD to refresh the application state from the source repository.',
       {
+        argocdInstanceId: z
+          .string()
+          .optional()
+          .describe(
+            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
+          ),
         applicationName: z.string(),
         applicationNamespace: ApplicationNamespaceSchema.optional(),
         refresh: z
@@ -107,11 +121,12 @@ export class Server extends McpServer {
             'Refresh the application state. "normal" refreshes from cache, "hard" forces a refresh from the git repository.'
           )
       },
-      async ({ applicationName, applicationNamespace, refresh }) => {
+      async ({ argocdInstanceId, applicationName, applicationNamespace, refresh }) => {
+        const client = this.getClient(argocdInstanceId);
         const options: { appNamespace?: string; refresh?: 'normal' | 'hard' } = {};
         if (applicationNamespace) options.appNamespace = applicationNamespace;
         if (refresh) options.refresh = refresh;
-        return await this.argocdClient.getApplication(
+        return await client.getApplication(
           applicationName,
           Object.keys(options).length > 0 ? options : undefined
         );
@@ -120,14 +135,30 @@ export class Server extends McpServer {
     this.addJsonOutputTool(
       'get_application_resource_tree',
       'get_application_resource_tree returns resource tree for application by application name',
-      { applicationName: z.string() },
-      async ({ applicationName }) =>
-        await this.argocdClient.getApplicationResourceTree(applicationName)
+      {
+        argocdInstanceId: z
+          .string()
+          .optional()
+          .describe(
+            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
+          ),
+        applicationName: z.string()
+      },
+      async ({ argocdInstanceId, applicationName }) => {
+        const client = this.getClient(argocdInstanceId);
+        return await client.getApplicationResourceTree(applicationName);
+      }
     );
     this.addJsonOutputTool(
       'get_application_managed_resources',
       'get_application_managed_resources returns managed resources for application by application name with optional filtering. Use filters to avoid token limits with large applications. Examples: kind="ConfigMap" for config maps only, namespace="production" for specific namespace, or combine multiple filters.',
       {
+        argocdInstanceId: z
+          .string()
+          .optional()
+          .describe(
+            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
+          ),
         applicationName: z.string(),
         kind: z
           .string()
@@ -142,7 +173,8 @@ export class Server extends McpServer {
         appNamespace: z.string().optional().describe('Filter by Argo CD application namespace'),
         project: z.string().optional().describe('Filter by Argo CD project')
       },
-      async ({ applicationName, kind, namespace, name, version, group, appNamespace, project }) => {
+      async ({ argocdInstanceId, applicationName, kind, namespace, name, version, group, appNamespace, project }) => {
+        const client = this.getClient(argocdInstanceId);
         const filters = {
           ...(kind && { kind }),
           ...(namespace && { namespace }),
@@ -152,7 +184,7 @@ export class Server extends McpServer {
           ...(appNamespace && { appNamespace }),
           ...(project && { project })
         };
-        return await this.argocdClient.getApplicationManagedResources(
+        return await client.getApplicationManagedResources(
           applicationName,
           Object.keys(filters).length > 0 ? filters : undefined
         );
@@ -162,29 +194,54 @@ export class Server extends McpServer {
       'get_application_workload_logs',
       'get_application_workload_logs returns logs for application workload (Deployment, StatefulSet, Pod, etc.) by application name and resource ref and optionally container name',
       {
+        argocdInstanceId: z
+          .string()
+          .optional()
+          .describe(
+            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
+          ),
         applicationName: z.string(),
         applicationNamespace: ApplicationNamespaceSchema,
         resourceRef: ResourceRefSchema,
         container: z.string()
       },
-      async ({ applicationName, applicationNamespace, resourceRef, container }) =>
-        await this.argocdClient.getWorkloadLogs(
+      async ({ argocdInstanceId, applicationName, applicationNamespace, resourceRef, container }) => {
+        const client = this.getClient(argocdInstanceId);
+        return await client.getWorkloadLogs(
           applicationName,
           applicationNamespace,
           resourceRef as V1alpha1ResourceResult,
           container
-        )
+        );
+      }
     );
     this.addJsonOutputTool(
       'get_application_events',
       'get_application_events returns events for application by application name',
-      { applicationName: z.string() },
-      async ({ applicationName }) => await this.argocdClient.getApplicationEvents(applicationName)
+      {
+        argocdInstanceId: z
+          .string()
+          .optional()
+          .describe(
+            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
+          ),
+        applicationName: z.string()
+      },
+      async ({ argocdInstanceId, applicationName }) => {
+        const client = this.getClient(argocdInstanceId);
+        return await client.getApplicationEvents(applicationName);
+      }
     );
     this.addJsonOutputTool(
       'get_resource_events',
       'get_resource_events returns events for a resource that is managed by an application',
       {
+        argocdInstanceId: z
+          .string()
+          .optional()
+          .describe(
+            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
+          ),
         applicationName: z.string(),
         applicationNamespace: ApplicationNamespaceSchema,
         resourceUID: z.string(),
@@ -192,34 +249,44 @@ export class Server extends McpServer {
         resourceName: z.string()
       },
       async ({
+        argocdInstanceId,
         applicationName,
         applicationNamespace,
         resourceUID,
         resourceNamespace,
         resourceName
-      }) =>
-        await this.argocdClient.getResourceEvents(
+      }) => {
+        const client = this.getClient(argocdInstanceId);
+        return await client.getResourceEvents(
           applicationName,
           applicationNamespace,
           resourceUID,
           resourceNamespace,
           resourceName
-        )
+        );
+      }
     );
     this.addJsonOutputTool(
       'get_resources',
       'get_resources return manifests for resources specified by resourceRefs. If resourceRefs is empty or not provided, fetches all resources managed by the application.',
       {
+        argocdInstanceId: z
+          .string()
+          .optional()
+          .describe(
+            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
+          ),
         applicationName: z.string(),
         applicationNamespace: ApplicationNamespaceSchema,
         resourceRefs: ResourceRefSchema.array().optional()
       },
-      async ({ applicationName, applicationNamespace, resourceRefs }) => {
+      async ({ argocdInstanceId, applicationName, applicationNamespace, resourceRefs }) => {
+        const client = this.getClient(argocdInstanceId);
         let refs = resourceRefs || [];
         if (refs.length === 0) {
-          const tree = await this.argocdClient.getApplicationResourceTree(applicationName);
+          const tree = await client.getApplicationResourceTree(applicationName);
           refs =
-            tree.nodes?.map((node) => ({
+            tree.nodes?.map((node: any) => ({
               uid: node.uid!,
               version: node.version!,
               group: node.group!,
@@ -230,7 +297,7 @@ export class Server extends McpServer {
         }
         return Promise.all(
           refs.map((ref) =>
-            this.argocdClient.getResource(applicationName, applicationNamespace, ref)
+            client.getResource(applicationName, applicationNamespace, ref)
           )
         );
       }
@@ -239,16 +306,24 @@ export class Server extends McpServer {
       'get_resource_actions',
       'get_resource_actions returns actions for a resource that is managed by an application',
       {
+        argocdInstanceId: z
+          .string()
+          .optional()
+          .describe(
+            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
+          ),
         applicationName: z.string(),
         applicationNamespace: ApplicationNamespaceSchema,
         resourceRef: ResourceRefSchema
       },
-      async ({ applicationName, applicationNamespace, resourceRef }) =>
-        await this.argocdClient.getResourceActions(
+      async ({ argocdInstanceId, applicationName, applicationNamespace, resourceRef }) => {
+        const client = this.getClient(argocdInstanceId);
+        return await client.getResourceActions(
           applicationName,
           applicationNamespace,
           resourceRef as V1alpha1ResourceResult
-        )
+        );
+      }
     );
 
     // Only register modification tools if not in read-only mode
