@@ -6,6 +6,7 @@ import { ArgoCDConfig } from '../config/index.js';
 import { z, ZodRawShape } from 'zod';
 import { V1alpha1Application, V1alpha1ResourceResult } from '../types/argocd-types.js';
 import {
+  ArgoCDInstanceIdSchema,
   ApplicationNamespaceSchema,
   ApplicationSchema,
   ResourceRefSchema
@@ -48,12 +49,7 @@ export class Server extends McpServer {
       'list_applications',
       'list_applications returns list of applications. Use the filter parameters to narrow down results.',
       {
-        argocdInstanceId: z
-          .string()
-          .optional()
-          .describe(
-            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
-          ),
+        argocdInstanceId: ArgoCDInstanceIdSchema,
         name: z
           .string()
           .optional()
@@ -106,12 +102,7 @@ export class Server extends McpServer {
       'get_application',
       'get_application returns application by application name. Optionally specify the application namespace to get applications from non-default namespaces. Use refresh parameter to force ArgoCD to refresh the application state from the source repository.',
       {
-        argocdInstanceId: z
-          .string()
-          .optional()
-          .describe(
-            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
-          ),
+        argocdInstanceId: ArgoCDInstanceIdSchema,
         applicationName: z.string(),
         applicationNamespace: ApplicationNamespaceSchema.optional(),
         refresh: z
@@ -136,12 +127,7 @@ export class Server extends McpServer {
       'get_application_resource_tree',
       'get_application_resource_tree returns resource tree for application by application name',
       {
-        argocdInstanceId: z
-          .string()
-          .optional()
-          .describe(
-            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
-          ),
+        argocdInstanceId: ArgoCDInstanceIdSchema,
         applicationName: z.string()
       },
       async ({ argocdInstanceId, applicationName }) => {
@@ -153,12 +139,7 @@ export class Server extends McpServer {
       'get_application_managed_resources',
       'get_application_managed_resources returns managed resources for application by application name with optional filtering. Use filters to avoid token limits with large applications. Examples: kind="ConfigMap" for config maps only, namespace="production" for specific namespace, or combine multiple filters.',
       {
-        argocdInstanceId: z
-          .string()
-          .optional()
-          .describe(
-            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
-          ),
+        argocdInstanceId: ArgoCDInstanceIdSchema,
         applicationName: z.string(),
         kind: z
           .string()
@@ -194,12 +175,7 @@ export class Server extends McpServer {
       'get_application_workload_logs',
       'get_application_workload_logs returns logs for application workload (Deployment, StatefulSet, Pod, etc.) by application name and resource ref and optionally container name',
       {
-        argocdInstanceId: z
-          .string()
-          .optional()
-          .describe(
-            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
-          ),
+        argocdInstanceId: ArgoCDInstanceIdSchema,
         applicationName: z.string(),
         applicationNamespace: ApplicationNamespaceSchema,
         resourceRef: ResourceRefSchema,
@@ -219,12 +195,7 @@ export class Server extends McpServer {
       'get_application_events',
       'get_application_events returns events for application by application name',
       {
-        argocdInstanceId: z
-          .string()
-          .optional()
-          .describe(
-            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
-          ),
+        argocdInstanceId: ArgoCDInstanceIdSchema,
         applicationName: z.string()
       },
       async ({ argocdInstanceId, applicationName }) => {
@@ -236,12 +207,7 @@ export class Server extends McpServer {
       'get_resource_events',
       'get_resource_events returns events for a resource that is managed by an application',
       {
-        argocdInstanceId: z
-          .string()
-          .optional()
-          .describe(
-            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
-          ),
+        argocdInstanceId: ArgoCDInstanceIdSchema,
         applicationName: z.string(),
         applicationNamespace: ApplicationNamespaceSchema,
         resourceUID: z.string(),
@@ -270,12 +236,7 @@ export class Server extends McpServer {
       'get_resources',
       'get_resources return manifests for resources specified by resourceRefs. If resourceRefs is empty or not provided, fetches all resources managed by the application.',
       {
-        argocdInstanceId: z
-          .string()
-          .optional()
-          .describe(
-            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
-          ),
+        argocdInstanceId: ArgoCDInstanceIdSchema,
         applicationName: z.string(),
         applicationNamespace: ApplicationNamespaceSchema,
         resourceRefs: ResourceRefSchema.array().optional()
@@ -306,12 +267,7 @@ export class Server extends McpServer {
       'get_resource_actions',
       'get_resource_actions returns actions for a resource that is managed by an application',
       {
-        argocdInstanceId: z
-          .string()
-          .optional()
-          .describe(
-            'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
-          ),
+        argocdInstanceId: ArgoCDInstanceIdSchema,
         applicationName: z.string(),
         applicationNamespace: ApplicationNamespaceSchema,
         resourceRef: ResourceRefSchema
@@ -343,12 +299,7 @@ export class Server extends McpServer {
         'create_application',
         'create_application creates a new ArgoCD application in the specified namespace. The application.metadata.namespace field determines where the Application resource will be created (e.g., "argocd", "argocd-apps", or any custom namespace).',
         {
-          argocdInstanceId: z
-            .string()
-            .optional()
-            .describe(
-              'ID of the ArgoCD instance to create the application in. If not specified, uses the default instance.'
-            ),
+          argocdInstanceId: ArgoCDInstanceIdSchema,
           application: ApplicationSchema
         },
         async ({ argocdInstanceId, application }) => {
@@ -360,12 +311,7 @@ export class Server extends McpServer {
         'update_application',
         'update_application updates application',
         {
-          argocdInstanceId: z
-            .string()
-            .optional()
-            .describe(
-              'ID of the ArgoCD instance to update the application in. If not specified, uses the default instance.'
-            ),
+          argocdInstanceId: ArgoCDInstanceIdSchema,
           applicationName: z.string(),
           application: ApplicationSchema
         },
@@ -381,12 +327,7 @@ export class Server extends McpServer {
         'delete_application',
         'delete_application deletes application. Specify applicationNamespace if the application is in a non-default namespace to avoid permission errors.',
         {
-          argocdInstanceId: z
-            .string()
-            .optional()
-            .describe(
-              'ID of the ArgoCD instance to delete the application from. If not specified, uses the default instance.'
-            ),
+          argocdInstanceId: ArgoCDInstanceIdSchema,
           applicationName: z.string(),
           applicationNamespace: ApplicationNamespaceSchema.optional().describe(
             'The namespace where the application is located. Required if application is not in the default namespace.'
@@ -417,12 +358,7 @@ export class Server extends McpServer {
         'sync_application',
         'sync_application syncs application. Specify applicationNamespace if the application is in a non-default namespace to avoid permission errors.',
         {
-          argocdInstanceId: z
-            .string()
-            .optional()
-            .describe(
-              'ID of the ArgoCD instance to sync the application in. If not specified, uses the default instance.'
-            ),
+          argocdInstanceId: ArgoCDInstanceIdSchema,
           applicationName: z.string(),
           applicationNamespace: ApplicationNamespaceSchema.optional().describe(
             'The namespace where the application is located. Required if application is not in the default namespace.'
@@ -465,18 +401,19 @@ export class Server extends McpServer {
         'run_resource_action',
         'run_resource_action runs an action on a resource',
         {
-          argocdInstanceId: z
-            .string()
-            .optional()
-            .describe(
-              'ID of the ArgoCD instance to run the action in. If not specified, uses the default instance.'
-            ),
+          argocdInstanceId: ArgoCDInstanceIdSchema,
           applicationName: z.string(),
           applicationNamespace: ApplicationNamespaceSchema,
           resourceRef: ResourceRefSchema,
           action: z.string()
         },
-        async ({ argocdInstanceId, applicationName, applicationNamespace, resourceRef, action }) => {
+        async ({
+          argocdInstanceId,
+          applicationName,
+          applicationNamespace,
+          resourceRef,
+          action
+        }) => {
           const client = this.getClient(argocdInstanceId);
           return await client.runResourceAction(
             applicationName,

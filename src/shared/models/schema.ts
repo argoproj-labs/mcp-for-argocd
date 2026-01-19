@@ -1,5 +1,12 @@
 import { z } from 'zod';
 
+export const ArgoCDInstanceIdSchema = z
+  .string()
+  .optional()
+  .describe(
+    'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
+  );
+
 export const ApplicationNamespaceSchema = z
   .string()
   .min(1)
