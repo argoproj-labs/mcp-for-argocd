@@ -331,24 +331,51 @@ export class Server extends McpServer {
       this.addJsonOutputTool(
         'create_application',
         'create_application creates a new ArgoCD application in the specified namespace. The application.metadata.namespace field determines where the Application resource will be created (e.g., "argocd", "argocd-apps", or any custom namespace).',
-        { application: ApplicationSchema },
-        async ({ application }) =>
-          await this.argocdClient.createApplication(application as V1alpha1Application)
+        {
+          argocdInstanceId: z
+            .string()
+            .optional()
+            .describe(
+              'ID of the ArgoCD instance to create the application in. If not specified, uses the default instance.'
+            ),
+          application: ApplicationSchema
+        },
+        async ({ argocdInstanceId, application }) => {
+          const client = this.getClient(argocdInstanceId);
+          return await client.createApplication(application as V1alpha1Application);
+        }
       );
       this.addJsonOutputTool(
         'update_application',
         'update_application updates application',
-        { applicationName: z.string(), application: ApplicationSchema },
-        async ({ applicationName, application }) =>
-          await this.argocdClient.updateApplication(
+        {
+          argocdInstanceId: z
+            .string()
+            .optional()
+            .describe(
+              'ID of the ArgoCD instance to update the application in. If not specified, uses the default instance.'
+            ),
+          applicationName: z.string(),
+          application: ApplicationSchema
+        },
+        async ({ argocdInstanceId, applicationName, application }) => {
+          const client = this.getClient(argocdInstanceId);
+          return await client.updateApplication(
             applicationName,
             application as V1alpha1Application
-          )
+          );
+        }
       );
       this.addJsonOutputTool(
         'delete_application',
         'delete_application deletes application. Specify applicationNamespace if the application is in a non-default namespace to avoid permission errors.',
         {
+          argocdInstanceId: z
+            .string()
+            .optional()
+            .describe(
+              'ID of the ArgoCD instance to delete the application from. If not specified, uses the default instance.'
+            ),
           applicationName: z.string(),
           applicationNamespace: ApplicationNamespaceSchema.optional().describe(
             'The namespace where the application is located. Required if application is not in the default namespace.'
@@ -362,13 +389,14 @@ export class Server extends McpServer {
             .optional()
             .describe('Deletion propagation policy (e.g., "Foreground", "Background", "Orphan")')
         },
-        async ({ applicationName, applicationNamespace, cascade, propagationPolicy }) => {
+        async ({ argocdInstanceId, applicationName, applicationNamespace, cascade, propagationPolicy }) => {
+          const client = this.getClient(argocdInstanceId);
           const options: Record<string, string | boolean> = {};
           if (applicationNamespace) options.appNamespace = applicationNamespace;
           if (cascade !== undefined) options.cascade = cascade;
           if (propagationPolicy) options.propagationPolicy = propagationPolicy;
 
-          return await this.argocdClient.deleteApplication(
+          return await client.deleteApplication(
             applicationName,
             Object.keys(options).length > 0 ? options : undefined
           );
@@ -378,6 +406,12 @@ export class Server extends McpServer {
         'sync_application',
         'sync_application syncs application. Specify applicationNamespace if the application is in a non-default namespace to avoid permission errors.',
         {
+          argocdInstanceId: z
+            .string()
+            .optional()
+            .describe(
+              'ID of the ArgoCD instance to sync the application in. If not specified, uses the default instance.'
+            ),
           applicationName: z.string(),
           applicationNamespace: ApplicationNamespaceSchema.optional().describe(
             'The namespace where the application is located. Required if application is not in the default namespace.'
@@ -401,7 +435,8 @@ export class Server extends McpServer {
               'Additional sync options (e.g., ["CreateNamespace=true", "PrunePropagationPolicy=foreground"])'
             )
         },
-        async ({ applicationName, applicationNamespace, dryRun, prune, revision, syncOptions }) => {
+        async ({ argocdInstanceId, applicationName, applicationNamespace, dryRun, prune, revision, syncOptions }) => {
+          const client = this.getClient(argocdInstanceId);
           const options: Record<string, string | boolean | string[]> = {};
           if (applicationNamespace) options.appNamespace = applicationNamespace;
           if (dryRun !== undefined) options.dryRun = dryRun;
@@ -409,7 +444,7 @@ export class Server extends McpServer {
           if (revision) options.revision = revision;
           if (syncOptions) options.syncOptions = syncOptions;
 
-          return await this.argocdClient.syncApplication(
+          return await client.syncApplication(
             applicationName,
             Object.keys(options).length > 0 ? options : undefined
           );
@@ -419,18 +454,26 @@ export class Server extends McpServer {
         'run_resource_action',
         'run_resource_action runs an action on a resource',
         {
+          argocdInstanceId: z
+            .string()
+            .optional()
+            .describe(
+              'ID of the ArgoCD instance to run the action in. If not specified, uses the default instance.'
+            ),
           applicationName: z.string(),
           applicationNamespace: ApplicationNamespaceSchema,
           resourceRef: ResourceRefSchema,
           action: z.string()
         },
-        async ({ applicationName, applicationNamespace, resourceRef, action }) =>
-          await this.argocdClient.runResourceAction(
+        async ({ argocdInstanceId, applicationName, applicationNamespace, resourceRef, action }) => {
+          const client = this.getClient(argocdInstanceId);
+          return await client.runResourceAction(
             applicationName,
             applicationNamespace,
             resourceRef as V1alpha1ResourceResult,
             action
-          )
+          );
+        }
       );
     }
   }
