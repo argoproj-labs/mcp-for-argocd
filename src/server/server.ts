@@ -33,10 +33,7 @@ export class Server extends McpServer {
 
     // Create a client for each configured instance
     for (const instance of serverInfo.argocdConfig.instances) {
-      this.argocdClients.set(
-        instance.id,
-        new ArgoCDClient(instance.baseUrl, instance.apiToken)
-      );
+      this.argocdClients.set(instance.id, new ArgoCDClient(instance.baseUrl, instance.apiToken));
     }
 
     const isReadOnly =
@@ -154,7 +151,17 @@ export class Server extends McpServer {
         appNamespace: z.string().optional().describe('Filter by Argo CD application namespace'),
         project: z.string().optional().describe('Filter by Argo CD project')
       },
-      async ({ argocdInstanceId, applicationName, kind, namespace, name, version, group, appNamespace, project }) => {
+      async ({
+        argocdInstanceId,
+        applicationName,
+        kind,
+        namespace,
+        name,
+        version,
+        group,
+        appNamespace,
+        project
+      }) => {
         const client = this.getClient(argocdInstanceId);
         const filters = {
           ...(kind && { kind }),
@@ -181,7 +188,13 @@ export class Server extends McpServer {
         resourceRef: ResourceRefSchema,
         container: z.string()
       },
-      async ({ argocdInstanceId, applicationName, applicationNamespace, resourceRef, container }) => {
+      async ({
+        argocdInstanceId,
+        applicationName,
+        applicationNamespace,
+        resourceRef,
+        container
+      }) => {
         const client = this.getClient(argocdInstanceId);
         return await client.getWorkloadLogs(
           applicationName,
@@ -247,7 +260,7 @@ export class Server extends McpServer {
         if (refs.length === 0) {
           const tree = await client.getApplicationResourceTree(applicationName);
           refs =
-            tree.nodes?.map((node: any) => ({
+            tree.nodes?.map((node) => ({
               uid: node.uid!,
               version: node.version!,
               group: node.group!,
@@ -257,9 +270,7 @@ export class Server extends McpServer {
             })) || [];
         }
         return Promise.all(
-          refs.map((ref) =>
-            client.getResource(applicationName, applicationNamespace, ref)
-          )
+          refs.map((ref) => client.getResource(applicationName, applicationNamespace, ref))
         );
       }
     );
@@ -287,7 +298,7 @@ export class Server extends McpServer {
       {},
       async () => {
         return {
-          instances: Array.from(this.argocdClients.keys()).map(id => ({ id })),
+          instances: Array.from(this.argocdClients.keys()).map((id) => ({ id })),
           defaultInstanceId: this.defaultInstanceId
         };
       }
@@ -341,7 +352,13 @@ export class Server extends McpServer {
             .optional()
             .describe('Deletion propagation policy (e.g., "Foreground", "Background", "Orphan")')
         },
-        async ({ argocdInstanceId, applicationName, applicationNamespace, cascade, propagationPolicy }) => {
+        async ({
+          argocdInstanceId,
+          applicationName,
+          applicationNamespace,
+          cascade,
+          propagationPolicy
+        }) => {
           const client = this.getClient(argocdInstanceId);
           const options: Record<string, string | boolean> = {};
           if (applicationNamespace) options.appNamespace = applicationNamespace;
@@ -382,7 +399,15 @@ export class Server extends McpServer {
               'Additional sync options (e.g., ["CreateNamespace=true", "PrunePropagationPolicy=foreground"])'
             )
         },
-        async ({ argocdInstanceId, applicationName, applicationNamespace, dryRun, prune, revision, syncOptions }) => {
+        async ({
+          argocdInstanceId,
+          applicationName,
+          applicationNamespace,
+          dryRun,
+          prune,
+          revision,
+          syncOptions
+        }) => {
           const client = this.getClient(argocdInstanceId);
           const options: Record<string, string | boolean | string[]> = {};
           if (applicationNamespace) options.appNamespace = applicationNamespace;
