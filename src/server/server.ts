@@ -33,14 +33,26 @@ export class Server extends McpServer {
     // Always register read/query tools
     this.addJsonOutputTool(
       'list_applications',
-      'list_applications returns list of applications',
+      'list_applications returns list of applications. Use the filter parameters to narrow down results.',
       {
-        search: z
+        name: z
           .string()
           .optional()
           .describe(
-            'Search applications by name. This is a partial match on the application name and does not support glob patterns (e.g. "*"). Optional.'
+            'Filter by application name. Supports glob patterns (e.g., "my-app-*"). Optional.'
           ),
+        project: z.string().optional().describe('Filter by ArgoCD project name. Optional.'),
+        repo: z.string().optional().describe('Filter by repository URL. Optional.'),
+        selector: z
+          .string()
+          .optional()
+          .describe(
+            'Filter by label selector (e.g., "env=prod,team=backend" or "app.kubernetes.io/name=my-app"). Optional.'
+          ),
+        appNamespace: z
+          .string()
+          .optional()
+          .describe('Filter by ArgoCD application namespace. Optional.'),
         limit: z
           .number()
           .int()
@@ -58,9 +70,13 @@ export class Server extends McpServer {
             'Number of applications to skip before returning results. Use with limit for pagination. Optional.'
           )
       },
-      async ({ search, limit, offset }) =>
+      async ({ name, project, repo, selector, appNamespace, limit, offset }) =>
         await this.argocdClient.listApplications({
-          search: search ?? undefined,
+          name,
+          project,
+          repo,
+          selector,
+          appNamespace,
           limit,
           offset
         })

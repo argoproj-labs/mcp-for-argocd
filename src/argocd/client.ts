@@ -22,14 +22,41 @@ export class ArgoCDClient {
     this.client = new HttpClient(this.baseUrl, this.apiToken);
   }
 
-  public async listApplications(params?: { search?: string; limit?: number; offset?: number }) {
+  /**
+   * Convert a glob pattern to a RegExp
+   * Supports: * (any chars), ? (single char), [...] (character class)
+   */
+  private globToRegex(pattern: string): RegExp {
+    const escaped = pattern.replace(/[.+^${}()|\\]/g, '\\$&');
+    const regexStr = escaped.replace(/\*/g, '.*').replace(/\?/g, '.');
+    return new RegExp(`^${regexStr}$`, 'i');
+  }
+
+  public async listApplications(params?: {
+    name?: string;
+    project?: string;
+    repo?: string;
+    selector?: string;
+    appNamespace?: string;
+    limit?: number;
+    offset?: number;
+  }) {
+    const queryParams: Record<string, string> = {};
+    // Check if name contains glob patterns - if so, filter client-side
+    const hasGlobPattern = params?.name && /[*?]/.test(params.name);
+    if (params?.name && !hasGlobPattern) queryParams.name = params.name;
+    if (params?.project) queryParams.project = params.project;
+    if (params?.repo) queryParams.repo = params.repo;
+    if (params?.selector) queryParams.selector = params.selector;
+    if (params?.appNamespace) queryParams.appNamespace = params.appNamespace;
+
     const { body } = await this.client.get<V1alpha1ApplicationList>(
       `/api/v1/applications`,
-      params?.search ? { search: params.search } : undefined
+      Object.keys(queryParams).length > 0 ? queryParams : undefined
     );
 
     // Strip heavy fields to reduce token usage
-    const strippedItems =
+    let strippedItems =
       body.items?.map((app) => ({
         metadata: {
           name: app.metadata?.name,
@@ -48,6 +75,12 @@ export class ArgoCDClient {
           summary: app.status?.summary
         }
       })) ?? [];
+
+    // Apply client-side glob pattern filtering for name
+    if (hasGlobPattern && params?.name) {
+      const regex = this.globToRegex(params.name);
+      strippedItems = strippedItems.filter((app) => regex.test(app.metadata?.name ?? ''));
+    }
 
     // Apply pagination
     const start = params?.offset ?? 0;
@@ -83,6 +116,13 @@ export class ArgoCDClient {
       `/api/v1/applications/${applicationName}`,
       Object.keys(queryParams).length > 0 ? queryParams : undefined
     );
+
+    // Strip heavy fields to reduce token usage
+    if (body.metadata) {
+      delete body.metadata.annotations;
+      delete body.metadata.managedFields;
+    }
+
     return body;
   }
 
