@@ -19,7 +19,7 @@ export const connectStdioTransport = () => {
   const server = createServer({ argocdConfig });
 
   logger.info('Connecting to stdio transport');
-  logger.info(`Configured ArgoCD instances: ${argocdConfig.instances.map(i => i.id).join(', ')}`);
+  logger.info(`Configured ArgoCD instances: ${argocdConfig.instances.map((i) => i.id).join(', ')}`);
   server.connect(new StdioServerTransport());
 };
 
@@ -72,7 +72,9 @@ export const connectHttpTransport = (port: number) => {
     if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
       transport = httpTransports[sessionIdFromHeader];
     } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
-      const configJson = req.headers['x-argocd-config-json'] as string | undefined;
+      const configJson =
+        (req.headers['x-argocd-config-json'] as string | undefined) ||
+        process.env.ARGOCD_CONFIG_JSON;
       const argocdBaseUrl =
         (req.headers['x-argocd-base-url'] as string) || process.env.ARGOCD_BASE_URL;
       const argocdApiToken =
