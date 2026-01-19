@@ -4,7 +4,7 @@ export const ArgoCDInstanceIdSchema = z
   .string()
   .optional()
   .describe(
-    'ID of the ArgoCD instance to query. If not specified, uses the default instance.'
+    'ID of the ArgoCD instance to target (e.g., "qa", "qa-ap", "prod"). Use list_argocd_instances tool to see all configured instances. If not specified, uses the default instance.'
   );
 
 export const ApplicationNamespaceSchema = z
