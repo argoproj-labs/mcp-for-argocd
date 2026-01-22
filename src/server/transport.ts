@@ -6,15 +6,86 @@ import { createServer } from './server.js';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { getDefaultServer, loadToken, isTokenExpired } from '../auth/token-store.js';
 
-export const connectStdioTransport = () => {
+interface AuthConfig {
+  baseUrl: string;
+  apiToken: string;
+}
+
+/**
+ * Resolve authentication credentials from environment variables or stored tokens
+ */
+async function resolveAuth(options?: { serverUrl?: string }): Promise<AuthConfig | null> {
+  // Priority 1: Environment variables
+  const envBaseUrl = process.env.ARGOCD_BASE_URL || '';
+  const envApiToken = process.env.ARGOCD_API_TOKEN || '';
+
+  if (envBaseUrl && envApiToken) {
+    logger.info('Using authentication from environment variables');
+    return { baseUrl: envBaseUrl, apiToken: envApiToken };
+  }
+
+  // Priority 2: Stored token for specific server
+  if (options?.serverUrl) {
+    const storedAuth = await loadToken(options.serverUrl);
+    if (storedAuth) {
+      if (isTokenExpired(storedAuth.token)) {
+        logger.warn(
+          { serverUrl: options.serverUrl },
+          'Stored token is expired. Please run `argocd-mcp login` to re-authenticate.'
+        );
+        return null;
+      }
+      logger.info({ serverUrl: options.serverUrl }, 'Using stored authentication token');
+      return {
+        baseUrl: storedAuth.serverUrl,
+        apiToken: storedAuth.token.accessToken
+      };
+    }
+    logger.warn({ serverUrl: options.serverUrl }, 'No stored authentication found for server');
+    return null;
+  }
+
+  // Priority 3: Default stored token (first stored server)
+  const defaultAuth = await getDefaultServer();
+  if (defaultAuth) {
+    if (isTokenExpired(defaultAuth.token)) {
+      logger.warn(
+        { serverUrl: defaultAuth.serverUrl },
+        'Stored token is expired. Please run `argocd-mcp login` to re-authenticate.'
+      );
+      return null;
+    }
+    logger.info({ serverUrl: defaultAuth.serverUrl }, 'Using default stored authentication token');
+    return {
+      baseUrl: defaultAuth.serverUrl,
+      apiToken: defaultAuth.token.accessToken
+    };
+  }
+
+  return null;
+}
+
+export const connectStdioTransport = async () => {
+  const auth = await resolveAuth();
+
+  if (!auth) {
+    console.error('Error: No authentication configured.');
+    console.error('');
+    console.error('Please either:');
+    console.error('  1. Set ARGOCD_BASE_URL and ARGOCD_API_TOKEN environment variables');
+    console.error('  2. Run `argocd-mcp login <server-url>` to authenticate via SSO');
+    process.exit(1);
+  }
+
   const server = createServer({
-    argocdBaseUrl: process.env.ARGOCD_BASE_URL || '',
-    argocdApiToken: process.env.ARGOCD_API_TOKEN || ''
+    argocdBaseUrl: auth.baseUrl,
+    argocdApiToken: auth.apiToken
   });
 
   logger.info('Connecting to stdio transport');
-  server.connect(new StdioServerTransport());
+  await server.connect(new StdioServerTransport());
 };
 
 export const connectSSETransport = (port: number) => {
