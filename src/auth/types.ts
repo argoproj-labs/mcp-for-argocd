@@ -4,6 +4,10 @@ export interface OIDCConfig {
   cliClientID?: string;
   scopes: string[];
   enablePKCEAuthentication: boolean;
+  /** Whether this config uses Dex (bundled with ArgoCD) */
+  useDex: boolean;
+  /** The ArgoCD server base URL (needed for Dex endpoints) */
+  argocdBaseUrl?: string;
 }
 
 export interface OIDCProviderMetadata {

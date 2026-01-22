@@ -17,6 +17,8 @@ export interface SSOLoginOptions {
   openBrowser?: boolean;
   /** Timeout in milliseconds (default: 5 minutes) */
   timeoutMs?: number;
+  /** Skip TLS certificate verification (default: false) */
+  insecure?: boolean;
 }
 
 export interface SSOLoginResult {
@@ -40,7 +42,13 @@ export async function performSSOLogin(
   serverUrl: string,
   options: SSOLoginOptions = {}
 ): Promise<SSOLoginResult> {
-  const { port = 8085, openBrowser = true, timeoutMs = 5 * 60 * 1000 } = options;
+  const { port = 8085, openBrowser = true, timeoutMs = 5 * 60 * 1000, insecure = false } = options;
+
+  // Set TLS verification based on insecure flag
+  if (insecure) {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    logger.warn('TLS certificate verification is disabled');
+  }
 
   logger.info({ serverUrl }, 'Starting SSO login flow');
 
@@ -53,8 +61,11 @@ export async function performSSOLogin(
   );
 
   // Step 2: Fetch OIDC provider metadata
-  logger.info({ issuer: oidcConfig.issuer }, 'Fetching OIDC provider metadata...');
-  const providerMetadata = await fetchOIDCProviderMetadata(oidcConfig.issuer);
+  logger.info(
+    { issuer: oidcConfig.issuer, useDex: oidcConfig.useDex },
+    'Fetching OIDC provider metadata...'
+  );
+  const providerMetadata = await fetchOIDCProviderMetadata(oidcConfig);
   logger.info('OIDC provider metadata loaded');
 
   // Step 3: Generate state and PKCE challenge

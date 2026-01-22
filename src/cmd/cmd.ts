@@ -62,13 +62,19 @@ export const cmd = () => {
           type: 'number',
           default: 8085,
           describe: 'Port for the SSO callback server'
+        })
+        .option('insecure', {
+          type: 'boolean',
+          default: false,
+          describe: 'Skip TLS certificate verification'
         });
     },
-    async ({ server, headless, ssoPort }) => {
+    async ({ server, headless, ssoPort, insecure }) => {
       try {
         await performSSOLogin(server as string, {
           port: ssoPort,
-          openBrowser: !headless
+          openBrowser: !headless,
+          insecure
         });
         console.log(`Successfully logged in to ${server}`);
       } catch (err) {
