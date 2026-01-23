@@ -6,11 +6,103 @@ import { createServer } from './server.js';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import { getDefaultServer, loadToken, isTokenExpired } from '../auth/token-store.js';
+import { getDefaultServer, loadToken, isTokenExpired, saveToken } from '../auth/token-store.js';
+import { createTokenRefreshProvider } from '../auth/token-refresh.js';
+import { fetchOIDCProviderMetadata } from '../auth/settings.js';
+import { refreshAccessToken } from '../auth/oauth.js';
+import { performSSOLogin } from '../auth/sso-login.js';
+import type { StoredAuth } from '../auth/types.js';
 
 interface AuthConfig {
   baseUrl: string;
   apiToken: string;
+  /** Whether this auth comes from SSO (stored token with refresh capability) */
+  isSSOAuth: boolean;
+}
+
+/**
+ * Attempt to refresh an expired token at startup
+ * Returns the new access token if successful, null otherwise
+ */
+async function tryRefreshExpiredToken(storedAuth: StoredAuth): Promise<string | null> {
+  // First, try token refresh if we have a refresh token
+  if (storedAuth.token.refreshToken) {
+    try {
+      logger.info(
+        { serverUrl: storedAuth.serverUrl },
+        'Token expired, attempting refresh at startup...'
+      );
+
+      // Try with stored OIDC config first
+      let providerMetadata = await fetchOIDCProviderMetadata(storedAuth.oidcConfig);
+      let oidcConfig = storedAuth.oidcConfig;
+
+      try {
+        const newToken = await refreshAccessToken(
+          providerMetadata,
+          oidcConfig,
+          storedAuth.token.refreshToken
+        );
+        await saveToken(storedAuth.serverUrl, newToken, oidcConfig);
+        logger.info({ serverUrl: storedAuth.serverUrl }, 'Token refreshed successfully at startup');
+        return newToken.accessToken;
+      } catch {
+        // If refresh fails, try re-fetching OIDC settings from server (config may have changed)
+        logger.debug(
+          { serverUrl: storedAuth.serverUrl },
+          'Refresh with stored config failed, re-fetching OIDC settings...'
+        );
+
+        const { fetchOIDCSettings } = await import('../auth/settings.js');
+        oidcConfig = await fetchOIDCSettings(storedAuth.serverUrl);
+        providerMetadata = await fetchOIDCProviderMetadata(oidcConfig);
+
+        const newToken = await refreshAccessToken(
+          providerMetadata,
+          oidcConfig,
+          storedAuth.token.refreshToken
+        );
+        await saveToken(storedAuth.serverUrl, newToken, oidcConfig);
+        logger.info(
+          { serverUrl: storedAuth.serverUrl },
+          'Token refreshed successfully with updated OIDC config'
+        );
+        return newToken.accessToken;
+      }
+    } catch (error) {
+      logger.warn(
+        {
+          serverUrl: storedAuth.serverUrl,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        'Token refresh failed, falling back to browser login...'
+      );
+    }
+  } else {
+    logger.debug(
+      { serverUrl: storedAuth.serverUrl },
+      'No refresh token available, falling back to browser login...'
+    );
+  }
+
+  // If refresh failed or no refresh token, try full SSO login flow
+  try {
+    logger.info({ serverUrl: storedAuth.serverUrl }, 'Starting browser-based SSO login...');
+    const result = await performSSOLogin(storedAuth.serverUrl, {
+      openBrowser: true,
+      timeoutMs: 2 * 60 * 1000 // 2 minute timeout for reconnect
+    });
+    return result.token.accessToken;
+  } catch (error) {
+    logger.error(
+      {
+        serverUrl: storedAuth.serverUrl,
+        error: error instanceof Error ? error.message : String(error)
+      },
+      'SSO login failed'
+    );
+    return null;
+  }
 }
 
 /**
@@ -23,24 +115,34 @@ async function resolveAuth(options?: { serverUrl?: string }): Promise<AuthConfig
 
   if (envBaseUrl && envApiToken) {
     logger.info('Using authentication from environment variables');
-    return { baseUrl: envBaseUrl, apiToken: envApiToken };
+    return { baseUrl: envBaseUrl, apiToken: envApiToken, isSSOAuth: false };
   }
 
   // Priority 2: Stored token for specific server
   if (options?.serverUrl) {
     const storedAuth = await loadToken(options.serverUrl);
     if (storedAuth) {
+      let accessToken = storedAuth.token.accessToken;
+
       if (isTokenExpired(storedAuth.token)) {
-        logger.warn(
-          { serverUrl: options.serverUrl },
-          'Stored token is expired. Please run `argocd-mcp login` to re-authenticate.'
-        );
-        return null;
+        // Try to refresh the expired token
+        const refreshedToken = await tryRefreshExpiredToken(storedAuth);
+        if (refreshedToken) {
+          accessToken = refreshedToken;
+        } else {
+          logger.warn(
+            { serverUrl: options.serverUrl },
+            'Stored token is expired and refresh failed. Please run `argocd-mcp login` to re-authenticate.'
+          );
+          return null;
+        }
       }
+
       logger.info({ serverUrl: options.serverUrl }, 'Using stored authentication token');
       return {
         baseUrl: storedAuth.serverUrl,
-        apiToken: storedAuth.token.accessToken
+        apiToken: accessToken,
+        isSSOAuth: true
       };
     }
     logger.warn({ serverUrl: options.serverUrl }, 'No stored authentication found for server');
@@ -50,17 +152,27 @@ async function resolveAuth(options?: { serverUrl?: string }): Promise<AuthConfig
   // Priority 3: Default stored token (first stored server)
   const defaultAuth = await getDefaultServer();
   if (defaultAuth) {
+    let accessToken = defaultAuth.token.accessToken;
+
     if (isTokenExpired(defaultAuth.token)) {
-      logger.warn(
-        { serverUrl: defaultAuth.serverUrl },
-        'Stored token is expired. Please run `argocd-mcp login` to re-authenticate.'
-      );
-      return null;
+      // Try to refresh the expired token
+      const refreshedToken = await tryRefreshExpiredToken(defaultAuth);
+      if (refreshedToken) {
+        accessToken = refreshedToken;
+      } else {
+        logger.warn(
+          { serverUrl: defaultAuth.serverUrl },
+          'Stored token is expired and refresh failed. Please run `argocd-mcp login` to re-authenticate.'
+        );
+        return null;
+      }
     }
+
     logger.info({ serverUrl: defaultAuth.serverUrl }, 'Using default stored authentication token');
     return {
       baseUrl: defaultAuth.serverUrl,
-      apiToken: defaultAuth.token.accessToken
+      apiToken: accessToken,
+      isSSOAuth: true
     };
   }
 
@@ -79,9 +191,15 @@ export const connectStdioTransport = async () => {
     process.exit(1);
   }
 
+  // Create token refresh provider for SSO auth
+  const tokenRefreshProvider = auth.isSSOAuth
+    ? createTokenRefreshProvider(auth.baseUrl)
+    : undefined;
+
   const server = createServer({
     argocdBaseUrl: auth.baseUrl,
-    argocdApiToken: auth.apiToken
+    argocdApiToken: auth.apiToken,
+    tokenRefreshProvider
   });
 
   logger.info('Connecting to stdio transport');
@@ -158,9 +276,16 @@ export const connectHttpTransport = (port: number) => {
         }
       };
 
+      // Check if stored auth exists for token refresh capability
+      const storedAuth = await loadToken(argocdBaseUrl);
+      const tokenRefreshProvider = storedAuth
+        ? createTokenRefreshProvider(argocdBaseUrl)
+        : undefined;
+
       const server = createServer({
         argocdBaseUrl,
-        argocdApiToken
+        argocdApiToken,
+        tokenRefreshProvider
       });
 
       await server.connect(transport);
