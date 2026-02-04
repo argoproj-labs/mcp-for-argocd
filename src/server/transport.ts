@@ -10,7 +10,6 @@ import { getDefaultServer, loadToken, isTokenExpired, saveToken } from '../auth/
 import { createTokenRefreshProvider } from '../auth/token-refresh.js';
 import { fetchOIDCProviderMetadata } from '../auth/settings.js';
 import { refreshAccessToken } from '../auth/oauth.js';
-import { performSSOLogin } from '../auth/sso-login.js';
 import type { StoredAuth } from '../auth/types.js';
 
 interface AuthConfig {
@@ -75,34 +74,17 @@ async function tryRefreshExpiredToken(storedAuth: StoredAuth): Promise<string | 
           serverUrl: storedAuth.serverUrl,
           error: error instanceof Error ? error.message : String(error)
         },
-        'Token refresh failed, falling back to browser login...'
+        'Token refresh failed'
       );
     }
   } else {
     logger.debug(
       { serverUrl: storedAuth.serverUrl },
-      'No refresh token available, falling back to browser login...'
+      'No refresh token available'
     );
   }
 
-  // If refresh failed or no refresh token, try full SSO login flow
-  try {
-    logger.info({ serverUrl: storedAuth.serverUrl }, 'Starting browser-based SSO login...');
-    const result = await performSSOLogin(storedAuth.serverUrl, {
-      openBrowser: true,
-      timeoutMs: 2 * 60 * 1000 // 2 minute timeout for reconnect
-    });
-    return result.token.accessToken;
-  } catch (error) {
-    logger.error(
-      {
-        serverUrl: storedAuth.serverUrl,
-        error: error instanceof Error ? error.message : String(error)
-      },
-      'SSO login failed'
-    );
-    return null;
-  }
+  return null;
 }
 
 /**
