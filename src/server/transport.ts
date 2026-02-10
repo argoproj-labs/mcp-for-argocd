@@ -10,6 +10,10 @@ import { getDefaultServer, loadToken, isTokenExpired, saveToken } from '../auth/
 import { createTokenRefreshProvider } from '../auth/token-refresh.js';
 import { fetchOIDCProviderMetadata } from '../auth/settings.js';
 import { refreshAccessToken } from '../auth/oauth.js';
+import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
+import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
+import { ArgocdOAuthProvider } from '../auth/mcp-oauth-provider.js';
+import { createCallbackRouter } from '../auth/mcp-oauth-callback.js';
 import type { StoredAuth } from '../auth/types.js';
 
 interface AuthConfig {
@@ -164,24 +168,16 @@ async function resolveAuth(options?: { serverUrl?: string }): Promise<AuthConfig
 export const connectStdioTransport = async () => {
   const auth = await resolveAuth();
 
-  if (!auth) {
-    console.error('Error: No authentication configured.');
-    console.error('');
-    console.error('Please either:');
-    console.error('  1. Set ARGOCD_BASE_URL and ARGOCD_API_TOKEN environment variables');
-    console.error('  2. Run `argocd-mcp login <server-url>` to authenticate via SSO');
-    process.exit(1);
-  }
-
-  // Create token refresh provider for SSO auth
-  const tokenRefreshProvider = auth.isSSOAuth
+  // Start server even without auth - tools will report auth errors gracefully
+  const tokenRefreshProvider = auth?.isSSOAuth
     ? createTokenRefreshProvider(auth.baseUrl)
     : undefined;
 
   const server = createServer({
-    argocdBaseUrl: auth.baseUrl,
-    argocdApiToken: auth.apiToken,
-    tokenRefreshProvider
+    argocdBaseUrl: auth?.baseUrl ?? '',
+    argocdApiToken: auth?.apiToken ?? '',
+    tokenRefreshProvider,
+    isAuthenticated: auth !== null
   });
 
   logger.info('Connecting to stdio transport');
@@ -220,74 +216,150 @@ export const connectSSETransport = (port: number) => {
   app.listen(port);
 };
 
-export const connectHttpTransport = (port: number) => {
+export const connectHttpTransport = (port: number, options?: {
+  serverUrl?: string;
+  insecure?: boolean;
+}) => {
   const app = express();
   app.use(express.json());
 
   const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
 
-  app.post('/mcp', async (req, res) => {
-    const sessionIdFromHeader = req.headers['mcp-session-id'] as string | undefined;
-    let transport: StreamableHTTPServerTransport;
+  if (options?.serverUrl) {
+    // OAuth 2.1 mode: MCP clients authenticate via OAuth flow proxied to ArgoCD OIDC
+    const callbackBaseUrl = `http://localhost:${port}`;
+    const provider = new ArgocdOAuthProvider(options.serverUrl, callbackBaseUrl, options.insecure);
 
-    if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
-      transport = httpTransports[sessionIdFromHeader];
-    } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
-      const argocdBaseUrl =
-        (req.headers['x-argocd-base-url'] as string) || process.env.ARGOCD_BASE_URL || '';
-      const argocdApiToken =
-        (req.headers['x-argocd-api-token'] as string) || process.env.ARGOCD_API_TOKEN || '';
+    // Install OAuth routes (/.well-known/oauth-authorization-server, /authorize, /token, /register)
+    app.use(mcpAuthRouter({
+      provider,
+      issuerUrl: new URL(callbackBaseUrl),
+      baseUrl: new URL(callbackBaseUrl),
+    }));
 
-      if (argocdBaseUrl == '' || argocdApiToken == '') {
-        res
-          .status(400)
-          .send('x-argocd-base-url and x-argocd-api-token must be provided in headers.');
+    // Install callback route for upstream OIDC redirect
+    app.use(createCallbackRouter(provider));
+
+    // Protect /mcp with bearer auth
+    const bearerAuth = requireBearerAuth({ verifier: provider });
+
+    app.post('/mcp', bearerAuth, async (req, res) => {
+      const sessionIdFromHeader = req.headers['mcp-session-id'] as string | undefined;
+      let transport: StreamableHTTPServerTransport;
+
+      if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
+        transport = httpTransports[sessionIdFromHeader];
+      } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
+        // Extract ArgoCD credentials from the verified OAuth token
+        const argocdToken = req.auth?.extra?.argocdToken as string;
+        const argocdBaseUrl = req.auth?.extra?.argocdBaseUrl as string;
+
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (newSessionId) => {
+            httpTransports[newSessionId] = transport;
+          }
+        });
+
+        transport.onclose = () => {
+          if (transport.sessionId) {
+            delete httpTransports[transport.sessionId];
+          }
+        };
+
+        const server = createServer({
+          argocdBaseUrl,
+          argocdApiToken: argocdToken,
+        });
+
+        await server.connect(transport);
+      } else {
+        const errorMsg = sessionIdFromHeader
+          ? `Invalid or expired session ID: ${sessionIdFromHeader}`
+          : 'Bad Request: Not an initialization request and no valid session ID provided.';
+        res.status(400).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32000,
+            message: errorMsg
+          },
+          id: req.body?.id !== undefined ? req.body.id : null
+        });
         return;
       }
 
-      transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (newSessionId) => {
-          httpTransports[newSessionId] = transport;
+      await transport.handleRequest(req, res, req.body);
+    });
+
+    logger.info(
+      { serverUrl: options.serverUrl, port },
+      'OAuth 2.1 authentication enabled for HTTP transport'
+    );
+  } else {
+    // Legacy mode: header-based auth
+    app.post('/mcp', async (req, res) => {
+      const sessionIdFromHeader = req.headers['mcp-session-id'] as string | undefined;
+      let transport: StreamableHTTPServerTransport;
+
+      if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
+        transport = httpTransports[sessionIdFromHeader];
+      } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
+        const argocdBaseUrl =
+          (req.headers['x-argocd-base-url'] as string) || process.env.ARGOCD_BASE_URL || '';
+        const argocdApiToken =
+          (req.headers['x-argocd-api-token'] as string) || process.env.ARGOCD_API_TOKEN || '';
+
+        if (argocdBaseUrl == '' || argocdApiToken == '') {
+          res
+            .status(400)
+            .send('x-argocd-base-url and x-argocd-api-token must be provided in headers.');
+          return;
         }
-      });
 
-      transport.onclose = () => {
-        if (transport.sessionId) {
-          delete httpTransports[transport.sessionId];
-        }
-      };
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (newSessionId) => {
+            httpTransports[newSessionId] = transport;
+          }
+        });
 
-      // Check if stored auth exists for token refresh capability
-      const storedAuth = await loadToken(argocdBaseUrl);
-      const tokenRefreshProvider = storedAuth
-        ? createTokenRefreshProvider(argocdBaseUrl)
-        : undefined;
+        transport.onclose = () => {
+          if (transport.sessionId) {
+            delete httpTransports[transport.sessionId];
+          }
+        };
 
-      const server = createServer({
-        argocdBaseUrl,
-        argocdApiToken,
-        tokenRefreshProvider
-      });
+        // Check if stored auth exists for token refresh capability
+        const storedAuth = await loadToken(argocdBaseUrl);
+        const tokenRefreshProvider = storedAuth
+          ? createTokenRefreshProvider(argocdBaseUrl)
+          : undefined;
 
-      await server.connect(transport);
-    } else {
-      const errorMsg = sessionIdFromHeader
-        ? `Invalid or expired session ID: ${sessionIdFromHeader}`
-        : 'Bad Request: Not an initialization request and no valid session ID provided.';
-      res.status(400).json({
-        jsonrpc: '2.0',
-        error: {
-          code: -32000,
-          message: errorMsg
-        },
-        id: req.body?.id !== undefined ? req.body.id : null
-      });
-      return;
-    }
+        const server = createServer({
+          argocdBaseUrl,
+          argocdApiToken,
+          tokenRefreshProvider
+        });
 
-    await transport.handleRequest(req, res, req.body);
-  });
+        await server.connect(transport);
+      } else {
+        const errorMsg = sessionIdFromHeader
+          ? `Invalid or expired session ID: ${sessionIdFromHeader}`
+          : 'Bad Request: Not an initialization request and no valid session ID provided.';
+        res.status(400).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32000,
+            message: errorMsg
+          },
+          id: req.body?.id !== undefined ? req.body.id : null
+        });
+        return;
+      }
+
+      await transport.handleRequest(req, res, req.body);
+    });
+  }
 
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;

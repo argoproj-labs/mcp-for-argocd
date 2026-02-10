@@ -35,12 +35,23 @@ export const cmd = () => {
     'http',
     'Start ArgoCD MCP server using Http Stream.',
     (yargs) => {
-      return yargs.option('port', {
-        type: 'number',
-        default: 3000
-      });
+      return yargs
+        .option('port', {
+          type: 'number',
+          default: 3000
+        })
+        .option('server-url', {
+          type: 'string',
+          describe: 'ArgoCD server URL - enables OAuth 2.1 authentication'
+        })
+        .option('insecure', {
+          type: 'boolean',
+          default: false,
+          describe: 'Skip TLS certificate verification'
+        });
     },
-    ({ port }) => connectHttpTransport(port)
+    ({ port, serverUrl, insecure }) =>
+      connectHttpTransport(port, { serverUrl, insecure })
   );
 
   exe.command(

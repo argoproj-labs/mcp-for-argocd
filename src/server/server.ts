@@ -15,16 +15,19 @@ type ServerInfo = {
   argocdBaseUrl: string;
   argocdApiToken: string;
   tokenRefreshProvider?: TokenRefreshProvider;
+  isAuthenticated?: boolean;
 };
 
 export class Server extends McpServer {
   private argocdClient: ArgoCDClient;
+  private isAuthenticated: boolean;
 
   constructor(serverInfo: ServerInfo) {
     super({
       name: packageJSON.name,
       version: packageJSON.version
     });
+    this.isAuthenticated = serverInfo.isAuthenticated ?? true;
     this.argocdClient = new ArgoCDClient({
       baseUrl: serverInfo.argocdBaseUrl,
       apiToken: serverInfo.argocdApiToken,
@@ -331,6 +334,19 @@ export class Server extends McpServer {
     cb: (...cbArgs: Parameters<ToolCallback<Args>>) => T
   ) {
     this.tool(name, description, paramsSchema as ZodRawShape, async (...args) => {
+      // Check authentication before executing tool
+      if (!this.isAuthenticated) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: 'Not authenticated. Please run `argocd-mcp login <server-url>` to authenticate via SSO, or set ARGOCD_BASE_URL and ARGOCD_API_TOKEN environment variables.'
+            }
+          ]
+        };
+      }
+
       try {
         const result = await cb.apply(this, args as Parameters<ToolCallback<Args>>);
         return {
