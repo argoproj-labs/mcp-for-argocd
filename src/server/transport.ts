@@ -13,7 +13,7 @@ import { refreshAccessToken } from '../auth/oauth.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { ArgocdOAuthProvider } from '../auth/mcp-oauth-provider.js';
-import { createCallbackRouter } from '../auth/mcp-oauth-callback.js';
+import { startCallbackServer } from '../auth/mcp-oauth-callback.js';
 import type { StoredAuth } from '../auth/types.js';
 
 interface AuthConfig {
@@ -219,6 +219,7 @@ export const connectSSETransport = (port: number) => {
 export const connectHttpTransport = (port: number, options?: {
   serverUrl?: string;
   insecure?: boolean;
+  callbackPort?: number;
 }) => {
   const app = express();
   app.use(express.json());
@@ -227,18 +228,22 @@ export const connectHttpTransport = (port: number, options?: {
 
   if (options?.serverUrl) {
     // OAuth 2.1 mode: MCP clients authenticate via OAuth flow proxied to ArgoCD OIDC
-    const callbackBaseUrl = `http://localhost:${port}`;
-    const provider = new ArgocdOAuthProvider(options.serverUrl, callbackBaseUrl, options.insecure);
+    const callbackPort = options.callbackPort ?? 8085;
+    const mcpBaseUrl = `http://localhost:${port}`;
+    const provider = new ArgocdOAuthProvider(options.serverUrl, callbackPort, options.insecure);
 
     // Install OAuth routes (/.well-known/oauth-authorization-server, /authorize, /token, /register)
     app.use(mcpAuthRouter({
       provider,
-      issuerUrl: new URL(callbackBaseUrl),
-      baseUrl: new URL(callbackBaseUrl),
+      issuerUrl: new URL(mcpBaseUrl),
+      baseUrl: new URL(mcpBaseUrl),
     }));
 
-    // Install callback route for upstream OIDC redirect
-    app.use(createCallbackRouter(provider));
+    // Start standalone callback server on the Dex-registered port
+    startCallbackServer(provider, callbackPort).catch((err) => {
+      logger.error({ error: err instanceof Error ? err.message : String(err) }, 'Failed to start OAuth callback server');
+      process.exit(1);
+    });
 
     // Protect /mcp with bearer auth
     const bearerAuth = requireBearerAuth({ verifier: provider });

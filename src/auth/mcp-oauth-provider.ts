@@ -83,11 +83,14 @@ export class ArgocdOAuthProvider implements OAuthServerProvider {
 
   readonly skipLocalPkceValidation = false;
 
+  private callbackUrl: string;
+
   constructor(
     private argocdServerUrl: string,
-    private callbackBaseUrl: string,
+    callbackPort: number = 8085,
     private insecure: boolean = false
   ) {
+    this.callbackUrl = `http://localhost:${callbackPort}/auth/callback`;
     // Periodic cleanup of stale state (every 5 minutes)
     this.cleanupInterval = setInterval(() => this.cleanup(), 5 * 60 * 1000);
     // Don't keep process alive just for cleanup
@@ -141,7 +144,7 @@ export class ArgocdOAuthProvider implements OAuthServerProvider {
     const upstreamPkce = oidcConfig.enablePKCEAuthentication ? generatePKCEChallenge() : undefined;
     const upstreamState = generateState();
 
-    const callbackUrl = new URL('/callback', this.callbackBaseUrl).toString();
+    const callbackUrl = this.callbackUrl;
 
     // Store pending auth keyed by upstream state
     this.pendingAuths.set(upstreamState, {
@@ -181,7 +184,7 @@ export class ArgocdOAuthProvider implements OAuthServerProvider {
     this.pendingAuths.delete(state);
 
     const { oidcConfig, providerMetadata } = await this.getOidcConfig();
-    const callbackUrl = new URL('/callback', this.callbackBaseUrl).toString();
+    const callbackUrl = this.callbackUrl;
 
     // Exchange the upstream code for ArgoCD tokens
     const argocdToken = await exchangeCodeForToken(

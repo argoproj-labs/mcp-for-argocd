@@ -48,10 +48,15 @@ export const cmd = () => {
           type: 'boolean',
           default: false,
           describe: 'Skip TLS certificate verification'
+        })
+        .option('callback-port', {
+          type: 'number',
+          default: 8085,
+          describe: 'Port for the OAuth callback server (must match Dex redirect_uri registration)'
         });
     },
-    ({ port, serverUrl, insecure }) =>
-      connectHttpTransport(port, { serverUrl, insecure })
+    ({ port, serverUrl, insecure, callbackPort }) =>
+      connectHttpTransport(port, { serverUrl, insecure, callbackPort })
   );
 
   exe.command(
