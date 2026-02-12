@@ -1,0 +1,22 @@
+image:
+  repository: quay.io/argoprojlabs/mcp-for-argocd
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+port: 3000
+
+env:
+  ARGOCD_BASE_URL: ""
+
+secret:
+  create: true
+  name: mcp-for-argocd-secret
+  argocdApiToken: ""
+
+service:
+  type: ClusterIP
+  port: 3000
+
+resources: {}
