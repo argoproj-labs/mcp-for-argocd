@@ -5,13 +5,11 @@
       "WebFetch(domain:github.com)",
       "WebFetch(domain:argo-cd.readthedocs.io)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(pnpm build:*)",
-      "Bash(pnpm lint:*)",
-      "Bash(pnpm lint:fix:*)",
-      "Bash(./dist/index.js --help)",
-      "Bash(./dist/index.js:*)",
-      "Bash(git -C /Users/atte/code/mcp-for-argocd log --oneline -20)",
-      "Bash(pnpm vitest:*)"
+      "Bash(pnpm build *)",
+      "Bash(pnpm lint *)",
+      "Bash(pnpm lint:fix *)",
+      "Bash(./dist/index.js *)",
+      "Bash(pnpm vitest *)"
     ]
   }
 }
