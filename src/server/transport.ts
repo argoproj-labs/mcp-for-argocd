@@ -6,8 +6,8 @@ import { createServer } from './server.js';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { runWithServerInfo, type ServerInfo } from './request-context.js';
 
-type ServerInfo = Parameters<typeof createServer>[0];
 type HttpTransportOptions = {
   stateless?: boolean;
 };
@@ -15,38 +15,21 @@ type HttpTransportOptions = {
 const getHeaderValue = (value: string | string[] | undefined) =>
   Array.isArray(value) ? value[0] : value;
 
-const getServerInfo = (req: express.Request): ServerInfo => {
+const getServerInfo = (req: express.Request, fallback: Partial<ServerInfo> = {}): ServerInfo => {
   const argocdBaseUrl = getHeaderValue(req.headers['x-argocd-base-url']) || '';
   const argocdApiToken = getHeaderValue(req.headers['x-argocd-api-token']) || '';
 
   return {
-    argocdBaseUrl: argocdBaseUrl || process.env.ARGOCD_BASE_URL || '',
-    argocdApiToken: argocdApiToken || process.env.ARGOCD_API_TOKEN || ''
+    argocdBaseUrl: argocdBaseUrl || fallback.argocdBaseUrl || process.env.ARGOCD_BASE_URL || '',
+    argocdApiToken: argocdApiToken || fallback.argocdApiToken || process.env.ARGOCD_API_TOKEN || ''
   };
 };
 
-const hasCompleteServerInfo = ({ argocdBaseUrl, argocdApiToken }: ServerInfo) =>
-  argocdBaseUrl !== '' && argocdApiToken !== '';
-
-const missingServerInfoMessage =
-  'x-argocd-base-url and x-argocd-api-token must be provided in headers or environment.';
-const missingStatelessServerInfoMessage =
-  'x-argocd-base-url and x-argocd-api-token must be provided in headers or environment for stateless HTTP mode.';
-
-const getMissingStatelessTransportMessage =
-  'Bad Request: No stateless transport found for the provided Argo CD configuration. Send initialize first.';
-
-const getStatelessTransportKey = ({ argocdBaseUrl, argocdApiToken }: ServerInfo) =>
-  `${argocdBaseUrl}\n${argocdApiToken}`;
-
-const createHttpServerTransport = async (
-  serverInfo: ServerInfo,
-  options: {
-    sessionIdGenerator: (() => string) | undefined;
-    onsessioninitialized?: (sessionId: string) => void;
-    onclose?: () => void;
-  }
-) => {
+const createHttpServerTransport = async (options: {
+  sessionIdGenerator: (() => string) | undefined;
+  onsessioninitialized?: (sessionId: string) => void;
+  onclose?: () => void;
+}) => {
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: options.sessionIdGenerator,
     onsessioninitialized: options.onsessioninitialized
@@ -54,37 +37,14 @@ const createHttpServerTransport = async (
 
   transport.onclose = options.onclose;
 
-  const server = createServer(serverInfo);
+  const server = createServer();
   await server.connect(transport);
 
   return transport;
 };
 
-const getOrCreateStatelessHttpTransport = async (
-  statelessHttpTransports: { [authKey: string]: StreamableHTTPServerTransport },
-  serverInfo: ServerInfo
-) => {
-  const authKey = getStatelessTransportKey(serverInfo);
-  let transport = statelessHttpTransports[authKey];
-
-  if (!transport) {
-    transport = await createHttpServerTransport(serverInfo, {
-      sessionIdGenerator: undefined,
-      onclose: () => {
-        delete statelessHttpTransports[authKey];
-      }
-    });
-    statelessHttpTransports[authKey] = transport;
-  }
-
-  return transport;
-};
-
 export const connectStdioTransport = () => {
-  const server = createServer({
-    argocdBaseUrl: process.env.ARGOCD_BASE_URL || '',
-    argocdApiToken: process.env.ARGOCD_API_TOKEN || ''
-  });
+  const server = createServer();
 
   logger.info('Connecting to stdio transport');
   server.connect(new StdioServerTransport());
@@ -95,10 +55,7 @@ export const connectSSETransport = (port: number) => {
   const transports: { [sessionId: string]: SSEServerTransport } = {};
 
   app.get('/sse', async (req, res) => {
-    const server = createServer({
-      argocdBaseUrl: (req.headers['x-argocd-base-url'] as string) || '',
-      argocdApiToken: (req.headers['x-argocd-api-token'] as string) || ''
-    });
+    const server = createServer();
 
     const transport = new SSEServerTransport('/messages', res);
     transports[transport.sessionId] = transport;
@@ -112,7 +69,9 @@ export const connectSSETransport = (port: number) => {
     const sessionId = req.query.sessionId as string;
     const transport = transports[sessionId];
     if (transport) {
-      await transport.handlePostMessage(req, res);
+      await runWithServerInfo(getServerInfo(req), async () => {
+        await transport.handlePostMessage(req, res);
+      });
     } else {
       res.status(400).send(`No transport found for sessionId: ${sessionId}`);
     }
@@ -127,51 +86,43 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
   app.use(express.json());
 
   const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
-  const statelessHttpTransports: { [authKey: string]: StreamableHTTPServerTransport } = {};
+  const httpTransportServerInfo: { [sessionId: string]: ServerInfo } = {};
+  let statelessHttpTransport: StreamableHTTPServerTransport | undefined;
+
+  const getStatelessHttpTransport = async () => {
+    if (!statelessHttpTransport) {
+      statelessHttpTransport = await createHttpServerTransport({
+        sessionIdGenerator: undefined
+      });
+    }
+
+    return statelessHttpTransport;
+  };
 
   app.post('/mcp', async (req, res) => {
     const sessionIdFromHeader = getHeaderValue(req.headers['mcp-session-id']);
-    const serverInfo = getServerInfo(req);
     let transport: StreamableHTTPServerTransport;
+    let serverInfo: ServerInfo;
 
     if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
       transport = httpTransports[sessionIdFromHeader];
+      serverInfo = getServerInfo(req, httpTransportServerInfo[sessionIdFromHeader]);
     } else if (options.stateless) {
-      if (!hasCompleteServerInfo(serverInfo)) {
-        res.status(400).send(missingStatelessServerInfoMessage);
-        return;
-      }
-
-      if (isInitializeRequest(req.body)) {
-        transport = await getOrCreateStatelessHttpTransport(statelessHttpTransports, serverInfo);
-      } else {
-        transport = statelessHttpTransports[getStatelessTransportKey(serverInfo)];
-        if (!transport) {
-          res.status(400).json({
-            jsonrpc: '2.0',
-            error: {
-              code: -32000,
-              message: getMissingStatelessTransportMessage
-            },
-            id: req.body?.id !== undefined ? req.body.id : null
-          });
-          return;
-        }
-      }
+      transport = await getStatelessHttpTransport();
+      serverInfo = getServerInfo(req);
     } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
-      if (!hasCompleteServerInfo(serverInfo)) {
-        res.status(400).send(missingServerInfoMessage);
-        return;
-      }
+      serverInfo = getServerInfo(req);
 
-      transport = await createHttpServerTransport(serverInfo, {
+      transport = await createHttpServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newSessionId) => {
           httpTransports[newSessionId] = transport;
+          httpTransportServerInfo[newSessionId] = serverInfo;
         },
         onclose: () => {
           if (transport.sessionId) {
             delete httpTransports[transport.sessionId];
+            delete httpTransportServerInfo[transport.sessionId];
           }
         }
       });
@@ -190,32 +141,28 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
       return;
     }
 
-    await transport.handleRequest(req, res, req.body);
+    await runWithServerInfo(serverInfo, async () => {
+      await transport.handleRequest(req, res, req.body);
+    });
   });
 
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
     const sessionId = getHeaderValue(req.headers['mcp-session-id']);
     if (sessionId && httpTransports[sessionId]) {
       const transport = httpTransports[sessionId];
-      await transport.handleRequest(req, res);
+      const serverInfo = getServerInfo(req, httpTransportServerInfo[sessionId]);
+      await runWithServerInfo(serverInfo, async () => {
+        await transport.handleRequest(req, res);
+      });
       return;
     }
 
-    const serverInfo = getServerInfo(req);
     if (options.stateless) {
-      if (!hasCompleteServerInfo(serverInfo)) {
-        res.status(400).send(missingStatelessServerInfoMessage);
-        return;
-      }
-
-      const transport = statelessHttpTransports[getStatelessTransportKey(serverInfo)];
-
-      if (!transport) {
-        res.status(400).send(getMissingStatelessTransportMessage);
-        return;
-      }
-
-      await transport.handleRequest(req, res);
+      const transport = await getStatelessHttpTransport();
+      const serverInfo = getServerInfo(req);
+      await runWithServerInfo(serverInfo, async () => {
+        await transport.handleRequest(req, res);
+      });
       return;
     }
 

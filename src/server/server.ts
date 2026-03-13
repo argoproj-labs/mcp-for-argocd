@@ -4,26 +4,19 @@ import packageJSON from '../../package.json' with { type: 'json' };
 import { ArgoCDClient } from '../argocd/client.js';
 import { z, ZodRawShape } from 'zod';
 import { V1alpha1Application, V1alpha1ResourceResult } from '../types/argocd-types.js';
+import { getCurrentServerInfo } from './request-context.js';
 import {
   ApplicationNamespaceSchema,
   ApplicationSchema,
   ResourceRefSchema
 } from '../shared/models/schema.js';
 
-type ServerInfo = {
-  argocdBaseUrl: string;
-  argocdApiToken: string;
-};
-
 export class Server extends McpServer {
-  private argocdClient: ArgoCDClient;
-
-  constructor(serverInfo: ServerInfo) {
+  constructor() {
     super({
       name: packageJSON.name,
       version: packageJSON.version
     });
-    this.argocdClient = new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
 
     const isReadOnly =
       String(process.env.MCP_READ_ONLY ?? '')
@@ -318,6 +311,11 @@ export class Server extends McpServer {
     }
   }
 
+  private get argocdClient() {
+    const serverInfo = getCurrentServerInfo();
+    return new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
+  }
+
   private addJsonOutputTool<Args extends ZodRawShape, T>(
     name: string,
     description: string,
@@ -341,6 +339,4 @@ export class Server extends McpServer {
   }
 }
 
-export const createServer = (serverInfo: ServerInfo) => {
-  return new Server(serverInfo);
-};
+export const createServer = () => new Server();
