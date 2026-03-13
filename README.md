@@ -22,10 +22,9 @@ const urlForWebsites = `vscode:mcp/install?${encodeURIComponent(config)}`;
 const urlForGithub = `https://insiders.vscode.dev/redirect?url=${encodeURIComponent(urlForWebsites)}`;
 -->
 
-[<img src="https://img.shields.io/badge/VS_Code-VS_Code?style=flat-square&label=Install%20Server&color=0098FF" alt="Install in VS Code">](https://insiders.vscode.dev/redirect?url=vscode%3Amcp%2Finstall%3F%257B%2522name%2522%253A%2522argocd-mcp%2522%252C%2522command%2522%253A%2522npx%2522%252C%2522args%2522%253A%255B%2522argocd-mcp%2540latest%2522%252C%2522stdio%2522%255D%252C%2522env%2522%253A%257B%2522ARGOCD_BASE_URL%2522%253A%2522%253Cargocd_url%253E%2522%252C%2522ARGOCD_API_TOKEN%2522%253A%2522%253Cargocd_token%253E%2522%257D%257D) [<img alt="Install in VS Code Insiders" src="https://img.shields.io/badge/VS_Code_Insiders-VS_Code_Insiders?style=flat-square&label=Install%20Server&color=24bfa5">](https://insiders.vscode.dev/redirect?url=vscode-insiders%3Amcp%2Finstall%3F%257B%2522name%2522%253A%2522argocd-mcp%2522%252C%2522command%2522%253A%2522npx%2522%252C%2522args%2522%253A%255B%2522argocd-mcp%2540latest%2522%252C%2522stdio%2522%255D%252C%2522env%2522%253A%257B%2522ARGOCD_BASE_URL%2522%253A%2522%253Cargocd_url%253E%2522%252C%2522ARGOCD_API_TOKEN%2522%253A%2522%253Cargocd_token%253E%2522%257D%257D)
+[<img src="https://img.shields.io/badge/VS_Code-VS_Code?style=flat-square&label=Install%20Server&color=0098FF" alt="Install in VS Code">](https://insiders.vscode.dev/redirect?url=vscode%3Amcp%2Finstall%3F%257B%2522name%2522%253A%2522argocd-mcp%2522%252C%2522command%2522%253A%2522npx%2522%252C%2522args%2522%253A%255B%2522argocd-mcp%2540latest%2522%252C%2522stdio%2522%255D%252C%2522env%2522%253A%257B%2522ARGOCD_BASE_URL%2522%253A%2522%253Cargocd_url%253E%2522%252C%2522ARGOCD_API_TOKEN%2522%253A%2522%253Cargocd_token%253E%2522%257D%257D)  [<img alt="Install in VS Code Insiders" src="https://img.shields.io/badge/VS_Code_Insiders-VS_Code_Insiders?style=flat-square&label=Install%20Server&color=24bfa5">](https://insiders.vscode.dev/redirect?url=vscode-insiders%3Amcp%2Finstall%3F%257B%2522name%2522%253A%2522argocd-mcp%2522%252C%2522command%2522%253A%2522npx%2522%252C%2522args%2522%253A%255B%2522argocd-mcp%2540latest%2522%252C%2522stdio%2522%255D%252C%2522env%2522%253A%257B%2522ARGOCD_BASE_URL%2522%253A%2522%253Cargocd_url%253E%2522%252C%2522ARGOCD_API_TOKEN%2522%253A%2522%253Cargocd_token%253E%2522%257D%257D)
 
 ---
-
 ![argocd-mcp-demo](https://github.com/user-attachments/assets/091548d0-9927-4d4b-a2fe-4f99c7cea108)
 
 ## Features
@@ -39,7 +38,6 @@ const urlForGithub = `https://insiders.vscode.dev/redirect?url=${encodeURICompon
 The server provides the following ArgoCD management tools:
 
 ### Application Management
-
 - `list_applications`: List and filter all applications
 - `get_application`: Get detailed information about a specific application
 - `create_application`: Create a new application
@@ -48,7 +46,6 @@ The server provides the following ArgoCD management tools:
 - `sync_application`: Trigger a sync operation on an application
 
 ### Resource Management
-
 - `get_application_resource_tree`: Get the resource tree for a specific application
 - `get_application_managed_resources`: Get managed resources for a specific application
 - `get_application_workload_logs`: Get logs for application workloads (Pods, Deployments, etc.)
@@ -63,18 +60,19 @@ The server provides the following ArgoCD management tools:
 - Node.js (v18 or higher recommended)
 - pnpm package manager (for development)
 - Argo CD instance with API access
-- Argo CD API token (see the [docs for instructions](https://argo-cd.readthedocs.io/en/stable/developer-guide/api-docs/#authorization))
+- Argo CD API token (see the [docs for instructions](https://argo-cd.readthedocs.io/en/stable/developer-guide/api-docs/#authorization)) 
 
 ### Usage with Cursor
-
 1. Follow the [Cursor documentation for MCP support](https://docs.cursor.com/context/model-context-protocol), and create a `.cursor/mcp.json` file in your project:
-
 ```json
 {
   "mcpServers": {
     "argocd-mcp": {
       "command": "npx",
-      "args": ["argocd-mcp@latest", "stdio"],
+      "args": [
+        "argocd-mcp@latest",
+        "stdio"
+      ],
       "env": {
         "ARGOCD_BASE_URL": "<argocd_url>",
         "ARGOCD_API_TOKEN": "<argocd_token>"
@@ -89,14 +87,16 @@ The server provides the following ArgoCD management tools:
 ### Usage with VSCode
 
 1. Follow the [Use MCP servers in VS Code documentation](https://code.visualstudio.com/docs/copilot/chat/mcp-servers), and create a `.vscode/mcp.json` file in your project:
-
 ```json
 {
   "servers": {
     "argocd-mcp-stdio": {
       "type": "stdio",
       "command": "npx",
-      "args": ["argocd-mcp@latest", "stdio"],
+      "args": [
+        "argocd-mcp@latest",
+        "stdio"
+      ],
       "env": {
         "ARGOCD_BASE_URL": "<argocd_url>",
         "ARGOCD_API_TOKEN": "<argocd_token>"
@@ -111,13 +111,15 @@ The server provides the following ArgoCD management tools:
 ### Usage with Claude Desktop
 
 1. Follow the [MCP in Claude Desktop documentation](https://modelcontextprotocol.io/quickstart/user), and create a `claude_desktop_config.json` configuration file:
-
 ```json
 {
   "mcpServers": {
     "argocd-mcp": {
       "command": "npx",
-      "args": ["argocd-mcp@latest", "stdio"],
+      "args": [
+        "argocd-mcp@latest",
+        "stdio"
+      ],
       "env": {
         "ARGOCD_BASE_URL": "<argocd_url>",
         "ARGOCD_API_TOKEN": "<argocd_token>"
@@ -174,13 +176,10 @@ Notes:
 ### Read Only Mode
 
 If you want to run the MCP Server in a ReadOnly mode to avoid resource or application modification, you should set the environment variable:
-
 ```
 "MCP_READ_ONLY": "true"
 ```
-
 This will disable the following tools:
-
 - `create_application`
 - `update_application`
 - `delete_application`
@@ -192,24 +191,20 @@ By default, all the tools will be available.
 ## For Development
 
 1. Clone the repository:
-
 ```bash
 git clone https://github.com/argoproj-labs/mcp-for-argocd.git
 cd mcp-for-argocd
 ```
 
 2. Install project dependencies:
-
 ```bash
 pnpm install
 ```
 
 3. Start the development server with hot reloading enabled:
-
 ```bash
 pnpm run dev
 ```
-
 Once the server is running, you can utilize the MCP server within Visual Studio Code or other MCP client.
 
 ### Upgrading ArgoCD Types
@@ -221,10 +216,9 @@ To update the TypeScript type definitions based on the latest Argo CD API specif
 2. Place the downloaded `swagger.json` file in the root directory of the `argocd-mcp` project.
 
 3. Generate the TypeScript types from the Swagger definition by running the following command. This will create or overwrite the `src/types/argocd.d.ts` file:
-
-   ```bash
-   pnpm run generate-types
-   ```
+    ```bash
+    pnpm run generate-types
+    ```
 
 4. Update the `src/types/argocd-types.ts` file to export the required types from the newly generated `src/types/argocd.d.ts`. This step often requires manual review to ensure only necessary types are exposed.
 
