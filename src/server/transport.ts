@@ -29,9 +29,6 @@ const getServerInfo = (req: express.Request): ServerInfo => {
   };
 };
 
-const hasAnyHeaderServerInfo = ({ argocdBaseUrl, argocdApiToken }: ServerInfo) =>
-  argocdBaseUrl !== '' || argocdApiToken !== '';
-
 const hasCompleteServerInfo = ({ argocdBaseUrl, argocdApiToken }: ServerInfo) =>
   argocdBaseUrl !== '' && argocdApiToken !== '';
 
@@ -118,14 +115,12 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
 
   app.post('/mcp', async (req, res) => {
     const sessionIdFromHeader = getHeaderValue(req.headers['mcp-session-id']);
-    const headerServerInfo = getHeaderServerInfo(req);
     const serverInfo = getServerInfo(req);
-    const useStatelessTransport = options.stateless || hasAnyHeaderServerInfo(headerServerInfo);
     let transport: StreamableHTTPServerTransport;
 
     if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
       transport = httpTransports[sessionIdFromHeader];
-    } else if (useStatelessTransport) {
+    } else if (options.stateless) {
       if (!hasCompleteServerInfo(serverInfo)) {
         res.status(400).send(getMissingServerInfoMessage(true));
         return;
@@ -198,10 +193,8 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
       return;
     }
 
-    const headerServerInfo = getHeaderServerInfo(req);
     const serverInfo = getServerInfo(req);
-    const useStatelessTransport = options.stateless || hasAnyHeaderServerInfo(headerServerInfo);
-    if (useStatelessTransport) {
+    if (options.stateless) {
       if (!hasCompleteServerInfo(serverInfo)) {
         res.status(400).send(getMissingServerInfoMessage(true));
         return;

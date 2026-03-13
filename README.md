@@ -143,12 +143,12 @@ This disables TLS certificate validation for Node.js when connecting to Argo CD 
 
 ### Stateless HTTP Mode
 
-The `http` transport supports stateless operation in two ways:
+The `http` transport supports stateless operation when started with `--stateless`:
 
 - Start the server with `--stateless` to disable `mcp-session-id` handling for the HTTP transport.
-- Send `x-argocd-base-url` and `x-argocd-api-token` headers on requests to use stateless auth per request.
+- In this mode, the server can use Argo CD credentials from environment variables, request headers, or a mix of both.
 
-With `--stateless`, the server can use Argo CD credentials from environment variables or from request headers. Without `--stateless`, the existing session-based HTTP mode remains the default, but requests that provide both Argo CD headers can still use the stateless flow.
+Without `--stateless`, the existing session-based HTTP mode remains the default.
 
 Example:
 
@@ -169,7 +169,7 @@ Notes:
 
 - Stateless HTTP mode still requires the normal MCP `initialize` request before other MCP requests.
 - The server reuses a stateless transport keyed by the effective Argo CD base URL and API token, whether they come from headers, environment variables, or a mix of both.
-- If `--stateless` is not used and no Argo CD headers are provided, the HTTP transport continues to use the existing session-based behavior with `mcp-session-id`.
+- If `--stateless` is not used, the HTTP transport continues to use the existing session-based behavior with `mcp-session-id`.
 
 ### Read Only Mode
 
