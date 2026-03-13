@@ -82,17 +82,10 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
   app.post('/mcp', async (req, res) => {
     const sessionIdFromHeader = getHeaderValue(req.headers['mcp-session-id']);
 
-    if (options.stateless) {
-      const transport = await getStatelessHttpTransport();
-      const serverInfo = getServerInfo(req);
-      await runWithServerInfo(serverInfo, async () => {
-        await transport.handleRequest(req, res, req.body);
-      });
-      return;
-    } else if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
+    if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
       await httpTransports[sessionIdFromHeader]!.handleRequest(req, res, req.body);
       return;
-    } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
+    } else if (!options.stateless && !sessionIdFromHeader && isInitializeRequest(req.body)) {
       const serverInfo = getServerInfo(req);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
@@ -112,6 +105,13 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
 
       await transport.handleRequest(req, res, req.body);
       return;
+    } else if (options.stateless) {
+      const transport = await getStatelessHttpTransport();
+      const serverInfo = getServerInfo(req);
+      await runWithServerInfo(serverInfo, async () => {
+        await transport.handleRequest(req, res, req.body);
+      });
+      return;
     } else {
       const errorMsg = sessionIdFromHeader
         ? `Invalid or expired session ID: ${sessionIdFromHeader}`
@@ -130,28 +130,28 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
 
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
     const sessionId = getHeaderValue(req.headers['mcp-session-id']);
-    if (options.stateless) {
-      const transport = await getStatelessHttpTransport();
-      const serverInfo = getServerInfo(req);
-      await runWithServerInfo(serverInfo, async () => {
-        await transport.handleRequest(req, res);
-      });
+    if (!options.stateless) {
+      if (!sessionId || !httpTransports[sessionId]) {
+        res
+          .status(400)
+          .send(
+            sessionId
+              ? `Invalid or expired session ID: ${sessionId}`
+              : 'Invalid or missing session ID'
+          );
+        return;
+      }
+
+      const transport = httpTransports[sessionId];
+      await transport.handleRequest(req, res);
       return;
     }
 
-    if (!sessionId || !httpTransports[sessionId]) {
-      res
-        .status(400)
-        .send(
-          sessionId
-            ? `Invalid or expired session ID: ${sessionId}`
-            : 'Invalid or missing session ID'
-        );
-      return;
-    }
-
-    const transport = httpTransports[sessionId];
-    await transport.handleRequest(req, res);
+    const transport = await getStatelessHttpTransport();
+    const serverInfo = getServerInfo(req);
+    await runWithServerInfo(serverInfo, async () => {
+      await transport.handleRequest(req, res);
+    });
   };
 
   app.get('/mcp', handleSessionRequest);
