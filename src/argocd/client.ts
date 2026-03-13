@@ -10,16 +10,13 @@ import {
   V1alpha1ApplicationResourceResult
 } from '../types/argocd-types.js';
 import { HttpClient } from './http.js';
+import type { ServerInfo } from '../server/request-context.js';
 
 export class ArgoCDClient {
-  private baseUrl: string;
-  private apiToken: string;
   private client: HttpClient;
 
-  constructor(baseUrl: string, apiToken: string) {
-    this.baseUrl = baseUrl;
-    this.apiToken = apiToken;
-    this.client = new HttpClient(this.baseUrl, this.apiToken);
+  constructor(serverInfo: ServerInfo) {
+    this.client = new HttpClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
   }
 
   public async listApplications(params?: { search?: string; limit?: number; offset?: number }) {

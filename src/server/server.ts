@@ -21,10 +21,7 @@ export class Server extends McpServer {
     });
 
     if (serverInfo) {
-      this.boundArgocdClient = new ArgoCDClient(
-        serverInfo.argocdBaseUrl,
-        serverInfo.argocdApiToken
-      );
+      this.boundArgocdClient = new ArgoCDClient(serverInfo);
     }
 
     const isReadOnly =
@@ -326,7 +323,7 @@ export class Server extends McpServer {
     }
 
     const serverInfo = getCurrentServerInfo();
-    return new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
+    return new ArgoCDClient(serverInfo);
   }
 
   private addJsonOutputTool<Args extends ZodRawShape, T>(
