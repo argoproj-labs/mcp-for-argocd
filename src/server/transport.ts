@@ -2,7 +2,7 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import express from 'express';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { logger } from '../logging/logging.js';
-import { createServer, createStatelessServer } from './server.js';
+import { createServer } from './server.js';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
@@ -12,18 +12,18 @@ type HttpTransportOptions = {
   stateless?: boolean;
 };
 
-const getHeaderValue = (value: string | string[] | undefined) =>
-  Array.isArray(value) ? value[0] : value;
-
 const getServerInfo = (req: express.Request): ServerInfo => {
-  const argocdBaseUrl = getHeaderValue(req.headers['x-argocd-base-url']) || '';
-  const argocdApiToken = getHeaderValue(req.headers['x-argocd-api-token']) || '';
+  const argocdBaseUrl = (req.headers['x-argocd-base-url'] as string) || '';
+  const argocdApiToken = (req.headers['x-argocd-api-token'] as string) || '';
 
   return resolveServerInfo({ argocdBaseUrl, argocdApiToken });
 };
 
 export const connectStdioTransport = () => {
-  const server = createServer(resolveServerInfo());
+  const server = createServer({
+    argocdBaseUrl: process.env.ARGOCD_BASE_URL || '',
+    argocdApiToken: process.env.ARGOCD_API_TOKEN || ''
+  });
 
   logger.info('Connecting to stdio transport');
   server.connect(new StdioServerTransport());
@@ -34,7 +34,10 @@ export const connectSSETransport = (port: number) => {
   const transports: { [sessionId: string]: SSEServerTransport } = {};
 
   app.get('/sse', async (req, res) => {
-    const server = createServer(getServerInfo(req));
+    const server = createServer({
+      argocdBaseUrl: (req.headers['x-argocd-base-url'] as string) || '',
+      argocdApiToken: (req.headers['x-argocd-api-token'] as string) || ''
+    });
 
     const transport = new SSEServerTransport('/messages', res);
     transports[transport.sessionId] = transport;
@@ -71,7 +74,7 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
         sessionIdGenerator: undefined
       });
 
-      const server = createStatelessServer();
+      const server = createServer();
       await server.connect(transport);
       statelessHttpTransport = transport;
     }
@@ -80,14 +83,23 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
   };
 
   app.post('/mcp', async (req, res) => {
-    const sessionIdFromHeader = getHeaderValue(req.headers['mcp-session-id']);
+    if (options.stateless) {
+      const transport = await getStatelessHttpTransport();
+      const serverInfo = getServerInfo(req);
+      await runWithServerInfo(serverInfo, async () => {
+        await transport.handleRequest(req, res, req.body);
+      });
+      return;
+    }
+
+    const sessionIdFromHeader = req.headers['mcp-session-id'] as string | undefined;
+    let transport: StreamableHTTPServerTransport;
 
     if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
-      await httpTransports[sessionIdFromHeader]!.handleRequest(req, res, req.body);
-      return;
-    } else if (!options.stateless && !sessionIdFromHeader && isInitializeRequest(req.body)) {
+      transport = httpTransports[sessionIdFromHeader];
+    } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
       const serverInfo = getServerInfo(req);
-      const transport = new StreamableHTTPServerTransport({
+      transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newSessionId) => {
           httpTransports[newSessionId] = transport;
@@ -102,16 +114,6 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
 
       const server = createServer(serverInfo);
       await server.connect(transport);
-
-      await transport.handleRequest(req, res, req.body);
-      return;
-    } else if (options.stateless) {
-      const transport = await getStatelessHttpTransport();
-      const serverInfo = getServerInfo(req);
-      await runWithServerInfo(serverInfo, async () => {
-        await transport.handleRequest(req, res, req.body);
-      });
-      return;
     } else {
       const errorMsg = sessionIdFromHeader
         ? `Invalid or expired session ID: ${sessionIdFromHeader}`
@@ -126,6 +128,8 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
       });
       return;
     }
+
+    await transport.handleRequest(req, res, req.body);
   });
 
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {

@@ -12,11 +12,20 @@ import {
 } from '../shared/models/schema.js';
 
 export class Server extends McpServer {
-  constructor(private readonly getArgoCDClient: () => ArgoCDClient) {
+  private boundArgocdClient?: ArgoCDClient;
+
+  constructor(serverInfo?: ServerInfo) {
     super({
       name: packageJSON.name,
       version: packageJSON.version
     });
+
+    if (serverInfo) {
+      this.boundArgocdClient = new ArgoCDClient(
+        serverInfo.argocdBaseUrl,
+        serverInfo.argocdApiToken
+      );
+    }
 
     const isReadOnly =
       String(process.env.MCP_READ_ONLY ?? '')
@@ -312,7 +321,12 @@ export class Server extends McpServer {
   }
 
   private get argocdClient() {
-    return this.getArgoCDClient();
+    if (this.boundArgocdClient) {
+      return this.boundArgocdClient;
+    }
+
+    const serverInfo = getCurrentServerInfo();
+    return new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
   }
 
   private addJsonOutputTool<Args extends ZodRawShape, T>(
@@ -338,11 +352,4 @@ export class Server extends McpServer {
   }
 }
 
-export const createServer = (serverInfo: ServerInfo) =>
-  new Server(() => new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken));
-
-export const createStatelessServer = () =>
-  new Server(() => {
-    const serverInfo = getCurrentServerInfo();
-    return new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
-  });
+export const createServer = (serverInfo?: ServerInfo) => new Server(serverInfo);
