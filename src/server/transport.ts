@@ -11,6 +11,7 @@ type ServerInfo = Parameters<typeof createServer>[0];
 type HttpTransportOptions = {
   stateless?: boolean;
 };
+type HttpTransportMap = { [key: string]: StreamableHTTPServerTransport };
 
 const getHeaderValue = (value: string | string[] | undefined) =>
   Array.isArray(value) ? value[0] : value;
@@ -32,10 +33,10 @@ const getServerInfo = (req: express.Request): ServerInfo => {
 const hasCompleteServerInfo = ({ argocdBaseUrl, argocdApiToken }: ServerInfo) =>
   argocdBaseUrl !== '' && argocdApiToken !== '';
 
-const getMissingServerInfoMessage = (stateless: boolean) =>
-  stateless
-    ? 'x-argocd-base-url and x-argocd-api-token must be provided in headers or environment for stateless HTTP mode.'
-    : 'x-argocd-base-url and x-argocd-api-token must be provided in headers or environment.';
+const missingServerInfoMessage =
+  'x-argocd-base-url and x-argocd-api-token must be provided in headers or environment.';
+const missingStatelessServerInfoMessage =
+  'x-argocd-base-url and x-argocd-api-token must be provided in headers or environment for stateless HTTP mode.';
 
 const getMissingStatelessTransportMessage =
   'Bad Request: No stateless transport found for the provided Argo CD configuration. Send initialize first.';
@@ -62,6 +63,56 @@ const createHttpServerTransport = async (
   await server.connect(transport);
 
   return transport;
+};
+
+const createSessionHttpTransport = async (
+  httpTransports: HttpTransportMap,
+  serverInfo: ServerInfo
+) => {
+  const transport = await createHttpServerTransport(serverInfo, {
+    sessionIdGenerator: () => randomUUID(),
+    onsessioninitialized: (newSessionId) => {
+      httpTransports[newSessionId] = transport;
+    },
+    onclose: () => {
+      if (transport.sessionId) {
+        delete httpTransports[transport.sessionId];
+      }
+    }
+  });
+
+  return transport;
+};
+
+const getOrCreateStatelessHttpTransport = async (
+  statelessHttpTransports: HttpTransportMap,
+  serverInfo: ServerInfo
+) => {
+  const authKey = getStatelessTransportKey(serverInfo);
+  let transport = statelessHttpTransports[authKey];
+
+  if (!transport) {
+    transport = await createHttpServerTransport(serverInfo, {
+      sessionIdGenerator: undefined,
+      onclose: () => {
+        delete statelessHttpTransports[authKey];
+      }
+    });
+    statelessHttpTransports[authKey] = transport;
+  }
+
+  return transport;
+};
+
+const sendJsonRpcError = (req: express.Request, res: express.Response, message: string) => {
+  res.status(400).json({
+    jsonrpc: '2.0',
+    error: {
+      code: -32000,
+      message
+    },
+    id: req.body?.id !== undefined ? req.body.id : null
+  });
 };
 
 export const connectStdioTransport = () => {
@@ -110,8 +161,8 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
   const app = express();
   app.use(express.json());
 
-  const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
-  const statelessHttpTransports: { [authKey: string]: StreamableHTTPServerTransport } = {};
+  const httpTransports: HttpTransportMap = {};
+  const statelessHttpTransports: HttpTransportMap = {};
 
   app.post('/mcp', async (req, res) => {
     const sessionIdFromHeader = getHeaderValue(req.headers['mcp-session-id']);
@@ -122,63 +173,31 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
       transport = httpTransports[sessionIdFromHeader];
     } else if (options.stateless) {
       if (!hasCompleteServerInfo(serverInfo)) {
-        res.status(400).send(getMissingServerInfoMessage(true));
+        res.status(400).send(missingStatelessServerInfoMessage);
         return;
       }
 
-      const authKey = getStatelessTransportKey(serverInfo);
-      transport = statelessHttpTransports[authKey];
-
       if (isInitializeRequest(req.body)) {
+        transport = await getOrCreateStatelessHttpTransport(statelessHttpTransports, serverInfo);
+      } else {
+        transport = statelessHttpTransports[getStatelessTransportKey(serverInfo)];
         if (!transport) {
-          transport = await createHttpServerTransport(serverInfo, {
-            sessionIdGenerator: undefined,
-            onclose: () => {
-              delete statelessHttpTransports[authKey];
-            }
-          });
-          statelessHttpTransports[authKey] = transport;
+          sendJsonRpcError(req, res, getMissingStatelessTransportMessage);
+          return;
         }
-      } else if (!transport) {
-        res.status(400).json({
-          jsonrpc: '2.0',
-          error: {
-            code: -32000,
-            message: getMissingStatelessTransportMessage
-          },
-          id: req.body?.id !== undefined ? req.body.id : null
-        });
-        return;
       }
     } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
       if (!hasCompleteServerInfo(serverInfo)) {
-        res.status(400).send(getMissingServerInfoMessage(false));
+        res.status(400).send(missingServerInfoMessage);
         return;
       }
 
-      transport = await createHttpServerTransport(serverInfo, {
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (newSessionId) => {
-          httpTransports[newSessionId] = transport;
-        },
-        onclose: () => {
-          if (transport.sessionId) {
-            delete httpTransports[transport.sessionId];
-          }
-        }
-      });
+      transport = await createSessionHttpTransport(httpTransports, serverInfo);
     } else {
       const errorMsg = sessionIdFromHeader
         ? `Invalid or expired session ID: ${sessionIdFromHeader}`
         : 'Bad Request: Not an initialization request and no valid session ID provided.';
-      res.status(400).json({
-        jsonrpc: '2.0',
-        error: {
-          code: -32000,
-          message: errorMsg
-        },
-        id: req.body?.id !== undefined ? req.body.id : null
-      });
+      sendJsonRpcError(req, res, errorMsg);
       return;
     }
 
@@ -196,7 +215,7 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
     const serverInfo = getServerInfo(req);
     if (options.stateless) {
       if (!hasCompleteServerInfo(serverInfo)) {
-        res.status(400).send(getMissingServerInfoMessage(true));
+        res.status(400).send(missingStatelessServerInfoMessage);
         return;
       }
 
