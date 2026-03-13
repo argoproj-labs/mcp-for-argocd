@@ -11,22 +11,17 @@ type ServerInfo = Parameters<typeof createServer>[0];
 type HttpTransportOptions = {
   stateless?: boolean;
 };
-type HttpTransportMap = { [key: string]: StreamableHTTPServerTransport };
 
 const getHeaderValue = (value: string | string[] | undefined) =>
   Array.isArray(value) ? value[0] : value;
 
-const getHeaderServerInfo = (req: express.Request): ServerInfo => ({
-  argocdBaseUrl: getHeaderValue(req.headers['x-argocd-base-url']) || '',
-  argocdApiToken: getHeaderValue(req.headers['x-argocd-api-token']) || ''
-});
-
 const getServerInfo = (req: express.Request): ServerInfo => {
-  const headerServerInfo = getHeaderServerInfo(req);
+  const argocdBaseUrl = getHeaderValue(req.headers['x-argocd-base-url']) || '';
+  const argocdApiToken = getHeaderValue(req.headers['x-argocd-api-token']) || '';
 
   return {
-    argocdBaseUrl: headerServerInfo.argocdBaseUrl || process.env.ARGOCD_BASE_URL || '',
-    argocdApiToken: headerServerInfo.argocdApiToken || process.env.ARGOCD_API_TOKEN || ''
+    argocdBaseUrl: argocdBaseUrl || process.env.ARGOCD_BASE_URL || '',
+    argocdApiToken: argocdApiToken || process.env.ARGOCD_API_TOKEN || ''
   };
 };
 
@@ -65,27 +60,8 @@ const createHttpServerTransport = async (
   return transport;
 };
 
-const createSessionHttpTransport = async (
-  httpTransports: HttpTransportMap,
-  serverInfo: ServerInfo
-) => {
-  const transport = await createHttpServerTransport(serverInfo, {
-    sessionIdGenerator: () => randomUUID(),
-    onsessioninitialized: (newSessionId) => {
-      httpTransports[newSessionId] = transport;
-    },
-    onclose: () => {
-      if (transport.sessionId) {
-        delete httpTransports[transport.sessionId];
-      }
-    }
-  });
-
-  return transport;
-};
-
 const getOrCreateStatelessHttpTransport = async (
-  statelessHttpTransports: HttpTransportMap,
+  statelessHttpTransports: { [authKey: string]: StreamableHTTPServerTransport },
   serverInfo: ServerInfo
 ) => {
   const authKey = getStatelessTransportKey(serverInfo);
@@ -102,17 +78,6 @@ const getOrCreateStatelessHttpTransport = async (
   }
 
   return transport;
-};
-
-const sendJsonRpcError = (req: express.Request, res: express.Response, message: string) => {
-  res.status(400).json({
-    jsonrpc: '2.0',
-    error: {
-      code: -32000,
-      message
-    },
-    id: req.body?.id !== undefined ? req.body.id : null
-  });
 };
 
 export const connectStdioTransport = () => {
@@ -161,8 +126,8 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
   const app = express();
   app.use(express.json());
 
-  const httpTransports: HttpTransportMap = {};
-  const statelessHttpTransports: HttpTransportMap = {};
+  const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
+  const statelessHttpTransports: { [authKey: string]: StreamableHTTPServerTransport } = {};
 
   app.post('/mcp', async (req, res) => {
     const sessionIdFromHeader = getHeaderValue(req.headers['mcp-session-id']);
@@ -182,7 +147,14 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
       } else {
         transport = statelessHttpTransports[getStatelessTransportKey(serverInfo)];
         if (!transport) {
-          sendJsonRpcError(req, res, getMissingStatelessTransportMessage);
+          res.status(400).json({
+            jsonrpc: '2.0',
+            error: {
+              code: -32000,
+              message: getMissingStatelessTransportMessage
+            },
+            id: req.body?.id !== undefined ? req.body.id : null
+          });
           return;
         }
       }
@@ -192,12 +164,29 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
         return;
       }
 
-      transport = await createSessionHttpTransport(httpTransports, serverInfo);
+      transport = await createHttpServerTransport(serverInfo, {
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (newSessionId) => {
+          httpTransports[newSessionId] = transport;
+        },
+        onclose: () => {
+          if (transport.sessionId) {
+            delete httpTransports[transport.sessionId];
+          }
+        }
+      });
     } else {
       const errorMsg = sessionIdFromHeader
         ? `Invalid or expired session ID: ${sessionIdFromHeader}`
         : 'Bad Request: Not an initialization request and no valid session ID provided.';
-      sendJsonRpcError(req, res, errorMsg);
+      res.status(400).json({
+        jsonrpc: '2.0',
+        error: {
+          code: -32000,
+          message: errorMsg
+        },
+        id: req.body?.id !== undefined ? req.body.id : null
+      });
       return;
     }
 
