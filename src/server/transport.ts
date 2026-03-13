@@ -8,6 +8,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 
 type ServerInfo = Parameters<typeof createServer>[0];
+type HttpTransportOptions = {
+  stateless?: boolean;
+};
 
 const getHeaderValue = (value: string | string[] | undefined) =>
   Array.isArray(value) ? value[0] : value;
@@ -31,6 +34,14 @@ const hasAnyHeaderServerInfo = ({ argocdBaseUrl, argocdApiToken }: ServerInfo) =
 
 const hasCompleteServerInfo = ({ argocdBaseUrl, argocdApiToken }: ServerInfo) =>
   argocdBaseUrl !== '' && argocdApiToken !== '';
+
+const getMissingServerInfoMessage = (stateless: boolean) =>
+  stateless
+    ? 'x-argocd-base-url and x-argocd-api-token must be provided in headers or environment for stateless HTTP mode.'
+    : 'x-argocd-base-url and x-argocd-api-token must be provided in headers or environment.';
+
+const getMissingStatelessTransportMessage =
+  'Bad Request: No stateless transport found for the provided Argo CD configuration. Send initialize first.';
 
 const getStatelessTransportKey = ({ argocdBaseUrl, argocdApiToken }: ServerInfo) =>
   `${argocdBaseUrl}\n${argocdApiToken}`;
@@ -98,7 +109,7 @@ export const connectSSETransport = (port: number) => {
   app.listen(port);
 };
 
-export const connectHttpTransport = (port: number) => {
+export const connectHttpTransport = (port: number, options: HttpTransportOptions = {}) => {
   const app = express();
   app.use(express.json());
 
@@ -108,27 +119,24 @@ export const connectHttpTransport = (port: number) => {
   app.post('/mcp', async (req, res) => {
     const sessionIdFromHeader = getHeaderValue(req.headers['mcp-session-id']);
     const headerServerInfo = getHeaderServerInfo(req);
-    const hasHeaderAuth = hasAnyHeaderServerInfo(headerServerInfo);
+    const serverInfo = getServerInfo(req);
+    const useStatelessTransport = options.stateless || hasAnyHeaderServerInfo(headerServerInfo);
     let transport: StreamableHTTPServerTransport;
 
     if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
       transport = httpTransports[sessionIdFromHeader];
-    } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
-      if (hasHeaderAuth) {
-        if (!hasCompleteServerInfo(headerServerInfo)) {
-          res
-            .status(400)
-            .send(
-              'x-argocd-base-url and x-argocd-api-token must both be provided for stateless HTTP mode.'
-            );
-          return;
-        }
+    } else if (useStatelessTransport) {
+      if (!hasCompleteServerInfo(serverInfo)) {
+        res.status(400).send(getMissingServerInfoMessage(true));
+        return;
+      }
 
-        const authKey = getStatelessTransportKey(headerServerInfo);
-        transport = statelessHttpTransports[authKey];
+      const authKey = getStatelessTransportKey(serverInfo);
+      transport = statelessHttpTransports[authKey];
 
+      if (isInitializeRequest(req.body)) {
         if (!transport) {
-          transport = await createHttpServerTransport(headerServerInfo, {
+          transport = await createHttpServerTransport(serverInfo, {
             sessionIdGenerator: undefined,
             onclose: () => {
               delete statelessHttpTransports[authKey];
@@ -136,55 +144,34 @@ export const connectHttpTransport = (port: number) => {
           });
           statelessHttpTransports[authKey] = transport;
         }
-      } else {
-        const serverInfo = getServerInfo(req);
-
-        if (!hasCompleteServerInfo(serverInfo)) {
-          res
-            .status(400)
-            .send(
-              'x-argocd-base-url and x-argocd-api-token must be provided in headers or environment.'
-            );
-          return;
-        }
-
-        transport = await createHttpServerTransport(serverInfo, {
-          sessionIdGenerator: () => randomUUID(),
-          onsessioninitialized: (newSessionId) => {
-            httpTransports[newSessionId] = transport;
-          },
-          onclose: () => {
-            if (transport.sessionId) {
-              delete httpTransports[transport.sessionId];
-            }
-          }
-        });
-      }
-    } else if (!sessionIdFromHeader && hasHeaderAuth) {
-      if (!hasCompleteServerInfo(headerServerInfo)) {
-        res
-          .status(400)
-          .send(
-            'x-argocd-base-url and x-argocd-api-token must both be provided for stateless HTTP mode.'
-          );
-        return;
-      }
-
-      const authKey = getStatelessTransportKey(headerServerInfo);
-      transport = statelessHttpTransports[authKey];
-
-      if (!transport) {
+      } else if (!transport) {
         res.status(400).json({
           jsonrpc: '2.0',
           error: {
             code: -32000,
-            message:
-              'Bad Request: No stateless transport found for the provided Argo CD headers. Send initialize first.'
+            message: getMissingStatelessTransportMessage
           },
           id: req.body?.id !== undefined ? req.body.id : null
         });
         return;
       }
+    } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
+      if (!hasCompleteServerInfo(serverInfo)) {
+        res.status(400).send(getMissingServerInfoMessage(false));
+        return;
+      }
+
+      transport = await createHttpServerTransport(serverInfo, {
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (newSessionId) => {
+          httpTransports[newSessionId] = transport;
+        },
+        onclose: () => {
+          if (transport.sessionId) {
+            delete httpTransports[transport.sessionId];
+          }
+        }
+      });
     } else {
       const errorMsg = sessionIdFromHeader
         ? `Invalid or expired session ID: ${sessionIdFromHeader}`
@@ -212,24 +199,18 @@ export const connectHttpTransport = (port: number) => {
     }
 
     const headerServerInfo = getHeaderServerInfo(req);
-    if (hasAnyHeaderServerInfo(headerServerInfo)) {
-      if (!hasCompleteServerInfo(headerServerInfo)) {
-        res
-          .status(400)
-          .send(
-            'x-argocd-base-url and x-argocd-api-token must both be provided for stateless HTTP mode.'
-          );
+    const serverInfo = getServerInfo(req);
+    const useStatelessTransport = options.stateless || hasAnyHeaderServerInfo(headerServerInfo);
+    if (useStatelessTransport) {
+      if (!hasCompleteServerInfo(serverInfo)) {
+        res.status(400).send(getMissingServerInfoMessage(true));
         return;
       }
 
-      const transport = statelessHttpTransports[getStatelessTransportKey(headerServerInfo)];
+      const transport = statelessHttpTransports[getStatelessTransportKey(serverInfo)];
 
       if (!transport) {
-        res
-          .status(400)
-          .send(
-            'No stateless transport found for the provided Argo CD headers. Send initialize first.'
-          );
+        res.status(400).send(getMissingStatelessTransportMessage);
         return;
       }
 
