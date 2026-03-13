@@ -107,6 +107,16 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
     if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
       transport = httpTransports[sessionIdFromHeader];
       serverInfo = getServerInfo(req, httpTransportServerInfo[sessionIdFromHeader]);
+    } else if (sessionIdFromHeader) {
+      res.status(400).json({
+        jsonrpc: '2.0',
+        error: {
+          code: -32000,
+          message: `Invalid or expired session ID: ${sessionIdFromHeader}`
+        },
+        id: req.body?.id !== undefined ? req.body.id : null
+      });
+      return;
     } else if (options.stateless) {
       transport = await getStatelessHttpTransport();
       serverInfo = getServerInfo(req);
@@ -154,6 +164,11 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
       await runWithServerInfo(serverInfo, async () => {
         await transport.handleRequest(req, res);
       });
+      return;
+    }
+
+    if (sessionId) {
+      res.status(400).send(`Invalid or expired session ID: ${sessionId}`);
       return;
     }
 
