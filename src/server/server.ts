@@ -4,7 +4,7 @@ import packageJSON from '../../package.json' with { type: 'json' };
 import { ArgoCDClient } from '../argocd/client.js';
 import { z, ZodRawShape } from 'zod';
 import { V1alpha1Application, V1alpha1ResourceResult } from '../types/argocd-types.js';
-import { getCurrentServerInfo } from './request-context.js';
+import { getCurrentServerInfo, type ServerInfo } from './request-context.js';
 import {
   ApplicationNamespaceSchema,
   ApplicationSchema,
@@ -12,7 +12,7 @@ import {
 } from '../shared/models/schema.js';
 
 export class Server extends McpServer {
-  constructor() {
+  constructor(private readonly getArgoCDClient: () => ArgoCDClient) {
     super({
       name: packageJSON.name,
       version: packageJSON.version
@@ -312,8 +312,7 @@ export class Server extends McpServer {
   }
 
   private get argocdClient() {
-    const serverInfo = getCurrentServerInfo();
-    return new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
+    return this.getArgoCDClient();
   }
 
   private addJsonOutputTool<Args extends ZodRawShape, T>(
@@ -339,4 +338,11 @@ export class Server extends McpServer {
   }
 }
 
-export const createServer = () => new Server();
+export const createServer = (serverInfo: ServerInfo) =>
+  new Server(() => new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken));
+
+export const createStatelessServer = () =>
+  new Server(() => {
+    const serverInfo = getCurrentServerInfo();
+    return new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
+  });

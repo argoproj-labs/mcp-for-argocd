@@ -2,7 +2,7 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import express from 'express';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { logger } from '../logging/logging.js';
-import { createServer } from './server.js';
+import { createServer, createStatelessServer, type Server } from './server.js';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
@@ -23,6 +23,7 @@ const getServerInfo = (req: express.Request): ServerInfo => {
 };
 
 const createHttpServerTransport = async (options: {
+  server: Server;
   sessionIdGenerator: (() => string) | undefined;
   onsessioninitialized?: (sessionId: string) => void;
   onclose?: () => void;
@@ -34,14 +35,13 @@ const createHttpServerTransport = async (options: {
 
   transport.onclose = options.onclose;
 
-  const server = createServer();
-  await server.connect(transport);
+  await options.server.connect(transport);
 
   return transport;
 };
 
 export const connectStdioTransport = () => {
-  const server = createServer();
+  const server = createServer(resolveServerInfo());
 
   logger.info('Connecting to stdio transport');
   server.connect(new StdioServerTransport());
@@ -52,7 +52,7 @@ export const connectSSETransport = (port: number) => {
   const transports: { [sessionId: string]: SSEServerTransport } = {};
 
   app.get('/sse', async (req, res) => {
-    const server = createServer();
+    const server = createServer(getServerInfo(req));
 
     const transport = new SSEServerTransport('/messages', res);
     transports[transport.sessionId] = transport;
@@ -66,9 +66,7 @@ export const connectSSETransport = (port: number) => {
     const sessionId = req.query.sessionId as string;
     const transport = transports[sessionId];
     if (transport) {
-      await runWithServerInfo(getServerInfo(req), async () => {
-        await transport.handlePostMessage(req, res);
-      });
+      await transport.handlePostMessage(req, res);
     } else {
       res.status(400).send(`No transport found for sessionId: ${sessionId}`);
     }
@@ -83,12 +81,14 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
   app.use(express.json());
 
   const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
-  const httpTransportServerInfo: { [sessionId: string]: ServerInfo } = {};
   let statelessHttpTransport: StreamableHTTPServerTransport | undefined;
+  let statelessServer: Server | undefined;
 
   const getStatelessHttpTransport = async () => {
     if (!statelessHttpTransport) {
+      statelessServer = createStatelessServer();
       statelessHttpTransport = await createHttpServerTransport({
+        server: statelessServer,
         sessionIdGenerator: undefined
       });
     }
@@ -98,31 +98,34 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
 
   app.post('/mcp', async (req, res) => {
     const sessionIdFromHeader = getHeaderValue(req.headers['mcp-session-id']);
-    let transport: StreamableHTTPServerTransport;
-    let serverInfo: ServerInfo;
 
     if (options.stateless) {
-      transport = await getStatelessHttpTransport();
-      serverInfo = getServerInfo(req);
+      const transport = await getStatelessHttpTransport();
+      const serverInfo = getServerInfo(req);
+      await runWithServerInfo(serverInfo, async () => {
+        await transport.handleRequest(req, res, req.body);
+      });
+      return;
     } else if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
-      transport = httpTransports[sessionIdFromHeader];
-      serverInfo = httpTransportServerInfo[sessionIdFromHeader]!;
+      await httpTransports[sessionIdFromHeader]!.handleRequest(req, res, req.body);
+      return;
     } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
-      serverInfo = getServerInfo(req);
-
-      transport = await createHttpServerTransport({
+      const serverInfo = getServerInfo(req);
+      const transport = await createHttpServerTransport({
+        server: createServer(serverInfo),
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newSessionId) => {
           httpTransports[newSessionId] = transport;
-          httpTransportServerInfo[newSessionId] = serverInfo;
         },
         onclose: () => {
           if (transport.sessionId) {
             delete httpTransports[transport.sessionId];
-            delete httpTransportServerInfo[transport.sessionId];
           }
         }
       });
+
+      await transport.handleRequest(req, res, req.body);
+      return;
     } else {
       const errorMsg = sessionIdFromHeader
         ? `Invalid or expired session ID: ${sessionIdFromHeader}`
@@ -137,10 +140,6 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
       });
       return;
     }
-
-    await runWithServerInfo(serverInfo, async () => {
-      await transport.handleRequest(req, res, req.body);
-    });
   });
 
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
@@ -166,10 +165,7 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
     }
 
     const transport = httpTransports[sessionId];
-    const serverInfo = httpTransportServerInfo[sessionId]!;
-    await runWithServerInfo(serverInfo, async () => {
-      await transport.handleRequest(req, res);
-    });
+    await transport.handleRequest(req, res);
   };
 
   app.get('/mcp', handleSessionRequest);
