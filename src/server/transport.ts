@@ -2,7 +2,7 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import express from 'express';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { logger } from '../logging/logging.js';
-import { createServer, createStatelessServer, type Server } from './server.js';
+import { createServer, createStatelessServer } from './server.js';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
@@ -20,24 +20,6 @@ const getServerInfo = (req: express.Request): ServerInfo => {
   const argocdApiToken = getHeaderValue(req.headers['x-argocd-api-token']) || '';
 
   return resolveServerInfo({ argocdBaseUrl, argocdApiToken });
-};
-
-const createHttpServerTransport = async (options: {
-  server: Server;
-  sessionIdGenerator: (() => string) | undefined;
-  onsessioninitialized?: (sessionId: string) => void;
-  onclose?: () => void;
-}) => {
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: options.sessionIdGenerator,
-    onsessioninitialized: options.onsessioninitialized
-  });
-
-  transport.onclose = options.onclose;
-
-  await options.server.connect(transport);
-
-  return transport;
 };
 
 export const connectStdioTransport = () => {
@@ -82,15 +64,16 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
 
   const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
   let statelessHttpTransport: StreamableHTTPServerTransport | undefined;
-  let statelessServer: Server | undefined;
 
   const getStatelessHttpTransport = async () => {
     if (!statelessHttpTransport) {
-      statelessServer = createStatelessServer();
-      statelessHttpTransport = await createHttpServerTransport({
-        server: statelessServer,
+      const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined
       });
+
+      const server = createStatelessServer();
+      await server.connect(transport);
+      statelessHttpTransport = transport;
     }
 
     return statelessHttpTransport;
@@ -111,18 +94,21 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
       return;
     } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
       const serverInfo = getServerInfo(req);
-      const transport = await createHttpServerTransport({
-        server: createServer(serverInfo),
+      const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newSessionId) => {
           httpTransports[newSessionId] = transport;
-        },
-        onclose: () => {
-          if (transport.sessionId) {
-            delete httpTransports[transport.sessionId];
-          }
         }
       });
+
+      transport.onclose = () => {
+        if (transport.sessionId) {
+          delete httpTransports[transport.sessionId];
+        }
+      };
+
+      const server = createServer(serverInfo);
+      await server.connect(transport);
 
       await transport.handleRequest(req, res, req.body);
       return;
