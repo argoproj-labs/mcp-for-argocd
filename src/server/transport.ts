@@ -129,16 +129,10 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
   });
 
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
-    const sessionId = getHeaderValue(req.headers['mcp-session-id']);
+    const sessionId = req.headers['mcp-session-id'] as string | undefined;
     if (!options.stateless) {
       if (!sessionId || !httpTransports[sessionId]) {
-        res
-          .status(400)
-          .send(
-            sessionId
-              ? `Invalid or expired session ID: ${sessionId}`
-              : 'Invalid or missing session ID'
-          );
+        res.status(400).send('Invalid or missing session ID');
         return;
       }
 
