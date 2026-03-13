@@ -318,12 +318,9 @@ export class Server extends McpServer {
   }
 
   private get argocdClient() {
-    if (this.boundArgocdClient) {
-      return this.boundArgocdClient;
-    }
-
-    const serverInfo = getCurrentServerInfo();
-    return new ArgoCDClient(serverInfo);
+    return this.boundArgocdClient
+      ? this.boundArgocdClient
+      : new ArgoCDClient(getCurrentServerInfo());
   }
 
   private addJsonOutputTool<Args extends ZodRawShape, T>(
