@@ -6,7 +6,7 @@ import { createServer } from './server.js';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import { runWithServerInfo, type ServerInfo } from './request-context.js';
+import { resolveServerInfo, runWithServerInfo, type ServerInfo } from './request-context.js';
 
 type HttpTransportOptions = {
   stateless?: boolean;
@@ -19,10 +19,7 @@ const getServerInfo = (req: express.Request): ServerInfo => {
   const argocdBaseUrl = getHeaderValue(req.headers['x-argocd-base-url']) || '';
   const argocdApiToken = getHeaderValue(req.headers['x-argocd-api-token']) || '';
 
-  return {
-    argocdBaseUrl: argocdBaseUrl || process.env.ARGOCD_BASE_URL || '',
-    argocdApiToken: argocdApiToken || process.env.ARGOCD_API_TOKEN || ''
-  };
+  return resolveServerInfo({ argocdBaseUrl, argocdApiToken });
 };
 
 const createHttpServerTransport = async (options: {
@@ -105,18 +102,6 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
     let serverInfo: ServerInfo;
 
     if (options.stateless) {
-      if (sessionIdFromHeader) {
-        res.status(400).json({
-          jsonrpc: '2.0',
-          error: {
-            code: -32000,
-            message: 'mcp-session-id is not supported in stateless HTTP mode.'
-          },
-          id: req.body?.id !== undefined ? req.body.id : null
-        });
-        return;
-      }
-
       transport = await getStatelessHttpTransport();
       serverInfo = getServerInfo(req);
     } else if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
@@ -161,11 +146,6 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
     const sessionId = getHeaderValue(req.headers['mcp-session-id']);
     if (options.stateless) {
-      if (sessionId) {
-        res.status(400).send('mcp-session-id is not supported in stateless HTTP mode.');
-        return;
-      }
-
       const transport = await getStatelessHttpTransport();
       const serverInfo = getServerInfo(req);
       await runWithServerInfo(serverInfo, async () => {
