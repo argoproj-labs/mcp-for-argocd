@@ -15,13 +15,13 @@ type HttpTransportOptions = {
 const getHeaderValue = (value: string | string[] | undefined) =>
   Array.isArray(value) ? value[0] : value;
 
-const getServerInfo = (req: express.Request, fallback: Partial<ServerInfo> = {}): ServerInfo => {
+const getServerInfo = (req: express.Request): ServerInfo => {
   const argocdBaseUrl = getHeaderValue(req.headers['x-argocd-base-url']) || '';
   const argocdApiToken = getHeaderValue(req.headers['x-argocd-api-token']) || '';
 
   return {
-    argocdBaseUrl: argocdBaseUrl || fallback.argocdBaseUrl || process.env.ARGOCD_BASE_URL || '',
-    argocdApiToken: argocdApiToken || fallback.argocdApiToken || process.env.ARGOCD_API_TOKEN || ''
+    argocdBaseUrl: argocdBaseUrl || process.env.ARGOCD_BASE_URL || '',
+    argocdApiToken: argocdApiToken || process.env.ARGOCD_API_TOKEN || ''
   };
 };
 
@@ -104,22 +104,24 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
     let transport: StreamableHTTPServerTransport;
     let serverInfo: ServerInfo;
 
-    if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
-      transport = httpTransports[sessionIdFromHeader];
-      serverInfo = getServerInfo(req, httpTransportServerInfo[sessionIdFromHeader]);
-    } else if (sessionIdFromHeader) {
-      res.status(400).json({
-        jsonrpc: '2.0',
-        error: {
-          code: -32000,
-          message: `Invalid or expired session ID: ${sessionIdFromHeader}`
-        },
-        id: req.body?.id !== undefined ? req.body.id : null
-      });
-      return;
-    } else if (options.stateless) {
+    if (options.stateless) {
+      if (sessionIdFromHeader) {
+        res.status(400).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32000,
+            message: 'mcp-session-id is not supported in stateless HTTP mode.'
+          },
+          id: req.body?.id !== undefined ? req.body.id : null
+        });
+        return;
+      }
+
       transport = await getStatelessHttpTransport();
       serverInfo = getServerInfo(req);
+    } else if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
+      transport = httpTransports[sessionIdFromHeader];
+      serverInfo = httpTransportServerInfo[sessionIdFromHeader]!;
     } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
       serverInfo = getServerInfo(req);
 
@@ -158,21 +160,12 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
 
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
     const sessionId = getHeaderValue(req.headers['mcp-session-id']);
-    if (sessionId && httpTransports[sessionId]) {
-      const transport = httpTransports[sessionId];
-      const serverInfo = getServerInfo(req, httpTransportServerInfo[sessionId]);
-      await runWithServerInfo(serverInfo, async () => {
-        await transport.handleRequest(req, res);
-      });
-      return;
-    }
-
-    if (sessionId) {
-      res.status(400).send(`Invalid or expired session ID: ${sessionId}`);
-      return;
-    }
-
     if (options.stateless) {
+      if (sessionId) {
+        res.status(400).send('mcp-session-id is not supported in stateless HTTP mode.');
+        return;
+      }
+
       const transport = await getStatelessHttpTransport();
       const serverInfo = getServerInfo(req);
       await runWithServerInfo(serverInfo, async () => {
@@ -182,9 +175,21 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
     }
 
     if (!sessionId || !httpTransports[sessionId]) {
-      res.status(400).send('Invalid or missing session ID');
+      res
+        .status(400)
+        .send(
+          sessionId
+            ? `Invalid or expired session ID: ${sessionId}`
+            : 'Invalid or missing session ID'
+        );
       return;
     }
+
+    const transport = httpTransports[sessionId];
+    const serverInfo = httpTransportServerInfo[sessionId]!;
+    await runWithServerInfo(serverInfo, async () => {
+      await transport.handleRequest(req, res);
+    });
   };
 
   app.get('/mcp', handleSessionRequest);
