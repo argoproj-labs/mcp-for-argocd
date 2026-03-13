@@ -130,22 +130,22 @@ export const connectHttpTransport = (port: number, options: HttpTransportOptions
 
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
-    if (!options.stateless) {
-      if (!sessionId || !httpTransports[sessionId]) {
-        res.status(400).send('Invalid or missing session ID');
-        return;
-      }
-
-      const transport = httpTransports[sessionId];
-      await transport.handleRequest(req, res);
+    if (options.stateless) {
+      const transport = await getStatelessHttpTransport();
+      const serverInfo = getServerInfo(req);
+      await runWithServerInfo(serverInfo, async () => {
+        await transport.handleRequest(req, res);
+      });
       return;
     }
 
-    const transport = await getStatelessHttpTransport();
-    const serverInfo = getServerInfo(req);
-    await runWithServerInfo(serverInfo, async () => {
-      await transport.handleRequest(req, res);
-    });
+    if (!sessionId || !httpTransports[sessionId]) {
+      res.status(400).send('Invalid or missing session ID');
+      return;
+    }
+
+    const transport = httpTransports[sessionId];
+    await transport.handleRequest(req, res);
   };
 
   app.get('/mcp', handleSessionRequest);
