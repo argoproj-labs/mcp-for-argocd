@@ -155,9 +155,11 @@ export class ArgoCDClient {
     return body;
   }
 
-  public async getApplicationResourceTree(applicationName: string) {
+  public async getApplicationResourceTree(applicationName: string, appNamespace?: string) {
+    const queryParams = appNamespace ? { appNamespace } : undefined;
     const { body } = await this.client.get<V1alpha1ApplicationTree>(
-      `/api/v1/applications/${applicationName}/resource-tree`
+      `/api/v1/applications/${applicationName}/resource-tree`,
+      queryParams
     );
     return body;
   }
@@ -232,9 +234,11 @@ export class ArgoCDClient {
     return logs;
   }
 
-  public async getApplicationEvents(applicationName: string) {
+  public async getApplicationEvents(applicationName: string, appNamespace?: string) {
+    const queryParams = appNamespace ? { appNamespace } : undefined;
     const { body } = await this.client.get<V1EventList>(
-      `/api/v1/applications/${applicationName}/events`
+      `/api/v1/applications/${applicationName}/events`,
+      queryParams
     );
     return body;
   }

@@ -77,10 +77,15 @@ export class Server extends McpServer {
     );
     this.addJsonOutputTool(
       'get_application_resource_tree',
-      'get_application_resource_tree returns resource tree for application by application name',
-      { applicationName: z.string() },
-      async ({ applicationName }) =>
-        await this.argocdClient.getApplicationResourceTree(applicationName)
+      'get_application_resource_tree returns resource tree for application by application name. Optionally specify the application namespace to get resource tree from applications in non-default namespaces.',
+      {
+        applicationName: z.string(),
+        applicationNamespace: ApplicationNamespaceSchema.optional().describe(
+          'The namespace where the application is located. Required if application is not in the default namespace.'
+        )
+      },
+      async ({ applicationName, applicationNamespace }) =>
+        await this.argocdClient.getApplicationResourceTree(applicationName, applicationNamespace)
     );
     this.addJsonOutputTool(
       'get_application_managed_resources',
@@ -135,9 +140,15 @@ export class Server extends McpServer {
     );
     this.addJsonOutputTool(
       'get_application_events',
-      'get_application_events returns events for application by application name',
-      { applicationName: z.string() },
-      async ({ applicationName }) => await this.argocdClient.getApplicationEvents(applicationName)
+      'get_application_events returns events for application by application name. Optionally specify the application namespace to get events from applications in non-default namespaces.',
+      {
+        applicationName: z.string(),
+        applicationNamespace: ApplicationNamespaceSchema.optional().describe(
+          'The namespace where the application is located. Required if application is not in the default namespace.'
+        )
+      },
+      async ({ applicationName, applicationNamespace }) =>
+        await this.argocdClient.getApplicationEvents(applicationName, applicationNamespace)
     );
     this.addJsonOutputTool(
       'get_resource_events',
