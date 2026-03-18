@@ -19,6 +19,34 @@ export const ResourceRefSchema = z.object({
   group: z.string()
 });
 
+/** Helm parameter passed to helm template (--set). */
+const HelmParameterSchema = z.object({
+  name: z.string().optional(),
+  value: z.string().optional(),
+  forceString: z.boolean().optional()
+});
+
+/** Helm file parameter passed to helm template (--set-file). */
+const HelmFileParameterSchema = z.object({
+  name: z.string().optional(),
+  path: z.string().optional()
+});
+
+/** Helm-specific options for the application source (valueFiles, parameters, releaseName, etc.). */
+export const ApplicationSourceHelmSchema = z
+  .object({
+    valueFiles: z.array(z.string()).optional().describe('Helm value files, e.g. ["values.yaml", "env/prod.yaml"]'),
+    parameters: z.array(HelmParameterSchema).optional().describe('Helm --set parameters'),
+    fileParameters: z.array(HelmFileParameterSchema).optional().describe('Helm --set-file parameters'),
+    releaseName: z.string().optional().describe('Helm release name; defaults to application name'),
+    values: z.string().optional().describe('Inline YAML values for helm template'),
+    ignoreMissingValueFiles: z.boolean().optional(),
+    skipCrds: z.boolean().optional(),
+    skipTests: z.boolean().optional(),
+    passCredentials: z.boolean().optional()
+  })
+  .optional();
+
 export const ApplicationSchema = z.object({
   metadata: z.object({
     name: z.string(),
@@ -29,7 +57,8 @@ export const ApplicationSchema = z.object({
     source: z.object({
       repoURL: z.string(),
       path: z.string(),
-      targetRevision: z.string()
+      targetRevision: z.string(),
+      helm: ApplicationSourceHelmSchema
     }),
     syncPolicy: z.object({
       syncOptions: z.array(z.string()),
@@ -46,6 +75,7 @@ export const ApplicationSchema = z.object({
             factor: z.number()
           })
         })
+        .optional()
     }),
     destination: z.object({
       server: z.string().optional(),
