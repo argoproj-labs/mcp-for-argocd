@@ -11,16 +11,23 @@ import {
   V1alpha1ClusterList
 } from '../types/argocd-types.js';
 import { HttpClient } from './http.js';
+import type { TokenRefreshProvider } from '../auth/token-refresh.js';
+
+export interface ArgoCDClientOptions {
+  baseUrl: string;
+  apiToken: string;
+  tokenRefreshProvider?: TokenRefreshProvider;
+}
 
 export class ArgoCDClient {
   private baseUrl: string;
   private apiToken: string;
   private client: HttpClient;
 
-  constructor(baseUrl: string, apiToken: string) {
-    this.baseUrl = baseUrl;
-    this.apiToken = apiToken;
-    this.client = new HttpClient(this.baseUrl, this.apiToken);
+  constructor(options: ArgoCDClientOptions) {
+    this.baseUrl = options.baseUrl;
+    this.apiToken = options.apiToken;
+    this.client = new HttpClient(this.baseUrl, this.apiToken, options.tokenRefreshProvider);
   }
 
   public async listApplications(params?: { search?: string; limit?: number; offset?: number }) {
