@@ -162,6 +162,70 @@ This will disable the following tools:
 
 By default, all the tools will be available.
 
+## Docker Deployment
+
+The Argo CD MCP server can be deployed as a Docker container, which is ideal for centralized deployments or when you don't want to manage a local Node.js environment.
+
+### Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) installed and running.
+- Argo CD API access and token.
+
+### Building the Image
+
+To build the image locally from the root of the repository:
+
+```bash
+docker build -t argocd-mcp .
+```
+
+### Configuration
+
+The container is configured using environment variables:
+
+| Variable | Description | Required | Default |
+| :--- | :--- | :--- | :--- |
+| `ARGOCD_BASE_URL` | The full URL of your Argo CD instance (e.g., `https://argo.example.com`) | Yes | - |
+| `ARGOCD_API_TOKEN` | Your Argo CD API Token | Yes | - |
+| `NODE_TLS_REJECT_UNAUTHORIZED` | Set to `0` to allow self-signed certificates | No | `1` |
+| `MCP_READ_ONLY` | Set to `true` to disable write operations | No | `false` |
+
+### Running the Container
+
+The server supports two network-based transport modes when running in Docker: **HTTP Stream** (default) and **SSE**.
+
+#### Option 1: HTTP Stream Transport (Default)
+This mode is used by many MCP clients that expect a direct HTTP stream.
+
+```bash
+docker run -d \
+  -p 3000:3000 \
+  -e ARGOCD_BASE_URL="https://your-argocd.com" \
+  -e ARGOCD_API_TOKEN="your-token-here" \
+  --name argocd-mcp \
+  argocd-mcp
+```
+*   **Access URL:** `http://localhost:3000/mcp`
+
+#### Option 2: SSE (Server-Sent Events) Transport
+Use this mode if your client requires an SSE-based connection. You must override the default command.
+
+```bash
+docker run -d \
+  -p 3000:3000 \
+  -e ARGOCD_BASE_URL="https://your-argocd.com" \
+  -e ARGOCD_API_TOKEN="your-token-here" \
+  --name argocd-mcp \
+  argocd-mcp node dist/index.js sse
+```
+*   **Access URL:** `http://localhost:3000/sse`
+
+### Troubleshooting
+
+- **"Cannot GET /"**: The server does not serve anything on the root path. Ensure you are connecting to the correct endpoint (`/mcp` or `/sse`).
+- **Connection Refused**: Verify that you have mapped the port correctly (`-p 3000:3000`).
+- **400 Bad Request**: This usually happens when the required headers (`x-argocd-base-url` and `x-argocd-api-token`) are missing and they are not set as environment variables in the container.
+
 ## For Development
 
 1. Clone the repository:
