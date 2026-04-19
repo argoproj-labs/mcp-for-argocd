@@ -53,6 +53,10 @@ export const connectHttpTransport = (port: number) => {
   const app = express();
   app.use(express.json());
 
+  app.get('/healthz', (_, res) => {
+    res.status(200).json({ status: 'ok' });
+  });
+
   const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
 
   app.post('/mcp', async (req, res) => {
