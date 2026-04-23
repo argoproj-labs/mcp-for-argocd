@@ -47,12 +47,12 @@
   "author": "Argo Proj Contributors.",
   "license": "Apache-2.0",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.10.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
     "pino": "^9.6.0",
     "yargs": "^17.7.2",
-    "zod": "^3.24.3"
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@dtsgenerator/replace-namespace": "^1.7.0",

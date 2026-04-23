@@ -49,9 +49,41 @@ export const connectSSETransport = (port: number) => {
   app.listen(port);
 };
 
-export const connectHttpTransport = (port: number) => {
+export const connectHttpTransport = (port: number, stateless = false) => {
   const app = express();
   app.use(express.json());
+
+  if (stateless) {
+    app.post('/mcp', async (req, res) => {
+      const argocdBaseUrl =
+        (req.headers['x-argocd-base-url'] as string) || process.env.ARGOCD_BASE_URL || '';
+      const argocdApiToken =
+        (req.headers['x-argocd-api-token'] as string) || process.env.ARGOCD_API_TOKEN || '';
+
+      if (!argocdBaseUrl || !argocdApiToken) {
+        res
+          .status(400)
+          .send('x-argocd-base-url and x-argocd-api-token must be provided in headers.');
+        return;
+      }
+
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      const server = createServer({ argocdBaseUrl, argocdApiToken });
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    });
+
+    app.get('/mcp', (_req, res) => {
+      res.status(405).send('Method Not Allowed');
+    });
+    app.delete('/mcp', (_req, res) => {
+      res.status(405).send('Method Not Allowed');
+    });
+
+    logger.info(`Connecting to Http Stream transport on port: ${port} (stateless mode)`);
+    app.listen(port);
+    return;
+  }
 
   const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
 

@@ -32,12 +32,18 @@ export const cmd = () => {
     'http',
     'Start ArgoCD MCP server using Http Stream.',
     (yargs) => {
-      return yargs.option('port', {
-        type: 'number',
-        default: 3000
-      });
+      return yargs
+        .option('port', {
+          type: 'number',
+          default: 3000
+        })
+        .option('stateless', {
+          type: 'boolean',
+          default: false,
+          description: 'Run in stateless mode'
+        });
     },
-    ({ port }) => connectHttpTransport(port)
+    ({ port, stateless }) => connectHttpTransport(port, stateless)
   );
 
   exe.demandCommand().parseSync();
