@@ -162,6 +162,30 @@ This will disable the following tools:
 
 By default, all the tools will be available.
 
+### Stateless Mode
+
+By default, the HTTP transport assigns a session ID to each client connection and keeps an in-memory map of active sessions. This works well for single-instance deployments but causes `400` errors when multiple replicas are running without sticky sessions, because a request routed to a different pod will not find the session that was created on the original pod.
+
+To run without session affinity requirements, start the server with the `--stateless` flag:
+
+```bash
+node dist/index.js http --stateless
+```
+
+Or with Docker:
+
+```bash
+docker run -e ARGOCD_BASE_URL=<argocd_url> -e ARGOCD_API_TOKEN=<argocd_token> \
+  argoprojlabs/mcp-for-argocd http --stateless
+```
+
+In stateless mode:
+- No `Mcp-Session-Id` is returned or required — any replica can handle any request
+- ArgoCD credentials must be supplied on every request via environment variables or `x-argocd-base-url` / `x-argocd-api-token` headers
+- `GET /mcp` and `DELETE /mcp` return `405 Method Not Allowed` (session-level SSE and termination are not supported)
+
+This mode is recommended for Kubernetes deployments with Horizontal Pod Autoscaling (HPA) where network-level sticky sessions are not available.
+
 ## For Development
 
 1. Clone the repository:
