@@ -49,41 +49,24 @@ export const connectSSETransport = (port: number) => {
   app.listen(port);
 };
 
+const resolveCredentials = (
+  req: express.Request,
+  res: express.Response
+): { argocdBaseUrl: string; argocdApiToken: string } | null => {
+  const argocdBaseUrl =
+    (req.headers['x-argocd-base-url'] as string) || process.env.ARGOCD_BASE_URL || '';
+  const argocdApiToken =
+    (req.headers['x-argocd-api-token'] as string) || process.env.ARGOCD_API_TOKEN || '';
+  if (!argocdBaseUrl || !argocdApiToken) {
+    res.status(400).send('x-argocd-base-url and x-argocd-api-token must be provided in headers.');
+    return null;
+  }
+  return { argocdBaseUrl, argocdApiToken };
+};
+
 export const connectHttpTransport = (port: number, stateless = false) => {
   const app = express();
   app.use(express.json());
-
-  if (stateless) {
-    app.post('/mcp', async (req, res) => {
-      const argocdBaseUrl =
-        (req.headers['x-argocd-base-url'] as string) || process.env.ARGOCD_BASE_URL || '';
-      const argocdApiToken =
-        (req.headers['x-argocd-api-token'] as string) || process.env.ARGOCD_API_TOKEN || '';
-
-      if (!argocdBaseUrl || !argocdApiToken) {
-        res
-          .status(400)
-          .send('x-argocd-base-url and x-argocd-api-token must be provided in headers.');
-        return;
-      }
-
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      const server = createServer({ argocdBaseUrl, argocdApiToken });
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
-    });
-
-    app.get('/mcp', (_req, res) => {
-      res.status(405).send('Method Not Allowed');
-    });
-    app.delete('/mcp', (_req, res) => {
-      res.status(405).send('Method Not Allowed');
-    });
-
-    logger.info(`Connecting to Http Stream transport on port: ${port} (stateless mode)`);
-    app.listen(port);
-    return;
-  }
 
   const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
 
@@ -91,39 +74,30 @@ export const connectHttpTransport = (port: number, stateless = false) => {
     const sessionIdFromHeader = req.headers['mcp-session-id'] as string | undefined;
     let transport: StreamableHTTPServerTransport;
 
-    if (sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
+    if (!stateless && sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
       transport = httpTransports[sessionIdFromHeader];
-    } else if (!sessionIdFromHeader && isInitializeRequest(req.body)) {
-      const argocdBaseUrl =
-        (req.headers['x-argocd-base-url'] as string) || process.env.ARGOCD_BASE_URL || '';
-      const argocdApiToken =
-        (req.headers['x-argocd-api-token'] as string) || process.env.ARGOCD_API_TOKEN || '';
+    } else if (stateless || (!sessionIdFromHeader && isInitializeRequest(req.body))) {
+      const credentials = resolveCredentials(req, res);
+      if (!credentials) return;
 
-      if (argocdBaseUrl == '' || argocdApiToken == '') {
-        res
-          .status(400)
-          .send('x-argocd-base-url and x-argocd-api-token must be provided in headers.');
-        return;
+      transport = new StreamableHTTPServerTransport(
+        stateless
+          ? { sessionIdGenerator: undefined }
+          : {
+              sessionIdGenerator: () => randomUUID(),
+              onsessioninitialized: (newSessionId) => {
+                httpTransports[newSessionId] = transport;
+              }
+            }
+      );
+
+      if (!stateless) {
+        transport.onclose = () => {
+          if (transport.sessionId) delete httpTransports[transport.sessionId];
+        };
       }
 
-      transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (newSessionId) => {
-          httpTransports[newSessionId] = transport;
-        }
-      });
-
-      transport.onclose = () => {
-        if (transport.sessionId) {
-          delete httpTransports[transport.sessionId];
-        }
-      };
-
-      const server = createServer({
-        argocdBaseUrl,
-        argocdApiToken
-      });
-
+      const server = createServer(credentials);
       await server.connect(transport);
     } else {
       const errorMsg = sessionIdFromHeader
@@ -131,10 +105,7 @@ export const connectHttpTransport = (port: number, stateless = false) => {
         : 'Bad Request: Not an initialization request and no valid session ID provided.';
       res.status(400).json({
         jsonrpc: '2.0',
-        error: {
-          code: -32000,
-          message: errorMsg
-        },
+        error: { code: -32000, message: errorMsg },
         id: req.body?.id !== undefined ? req.body.id : null
       });
       return;
@@ -144,18 +115,23 @@ export const connectHttpTransport = (port: number, stateless = false) => {
   });
 
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
+    if (stateless) {
+      res.status(405).send('Method Not Allowed');
+      return;
+    }
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
     if (!sessionId || !httpTransports[sessionId]) {
       res.status(400).send('Invalid or missing session ID');
       return;
     }
-    const transport = httpTransports[sessionId];
-    await transport.handleRequest(req, res);
+    await httpTransports[sessionId].handleRequest(req, res);
   };
 
   app.get('/mcp', handleSessionRequest);
   app.delete('/mcp', handleSessionRequest);
 
-  logger.info(`Connecting to Http Stream transport on port: ${port}`);
+  logger.info(
+    `Connecting to Http Stream transport on port: ${port}${stateless ? ' (stateless mode)' : ''}`
+  );
   app.listen(port);
 };
