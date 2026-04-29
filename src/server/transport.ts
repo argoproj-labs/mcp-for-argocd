@@ -116,7 +116,7 @@ export const connectHttpTransport = (port: number, stateless = false) => {
 
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
     if (stateless) {
-      res.status(405).send('Method Not Allowed');
+      res.status(405).send('Method Not Allowed in stateless mode');
       return;
     }
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
