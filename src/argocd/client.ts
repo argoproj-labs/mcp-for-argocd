@@ -24,10 +24,7 @@ export class ArgoCDClient {
   }
 
   public async listApplications(params?: { search?: string; limit?: number; offset?: number }) {
-    const { body } = await this.client.get<V1alpha1ApplicationList>(
-      `/api/v1/applications`,
-      params?.search ? { search: params.search } : undefined
-    );
+    const { body } = await this.client.get<V1alpha1ApplicationList>(`/api/v1/applications`);
 
     // Strip heavy fields to reduce token usage
     const strippedItems =
@@ -50,18 +47,25 @@ export class ArgoCDClient {
         }
       })) ?? [];
 
+    // Argo CD's REST API does not support a generic search parameter on
+    // GET /api/v1/applications, so apply the tool's documented name search locally.
+    const search = params?.search?.trim().toLowerCase();
+    const filteredItems = search
+      ? strippedItems.filter((app) => app.metadata.name?.toLowerCase().includes(search))
+      : strippedItems;
+
     // Apply pagination
     const start = params?.offset ?? 0;
-    const end = params?.limit ? start + params.limit : strippedItems.length;
-    const items = strippedItems.slice(start, end);
+    const end = params?.limit ? start + params.limit : filteredItems.length;
+    const items = filteredItems.slice(start, end);
 
     return {
       items,
       metadata: {
         resourceVersion: body.metadata?.resourceVersion,
-        totalItems: strippedItems.length,
+        totalItems: filteredItems.length,
         returnedItems: items.length,
-        hasMore: end < strippedItems.length
+        hasMore: end < filteredItems.length
       }
     };
   }
