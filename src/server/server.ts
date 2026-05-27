@@ -33,13 +33,21 @@ export class Server extends McpServer {
     // Always register read/query tools
     this.addJsonOutputTool(
       'list_applications',
-      'list_applications returns list of applications',
+      'list_applications returns a list of applications. When changedWithinMinutes is set, returns only applications with sync/deploy activity in that window (sorted by most recent activity, with lastSyncAt on each item). That mode scans all matching applications and may be slow on large ArgoCD instances.',
       {
         search: z
           .string()
           .optional()
           .describe(
             'Search applications by name. This is a partial match on the application name and does not support glob patterns (e.g. "*"). Optional.'
+          ),
+        changedWithinMinutes: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            'When set, only return applications with sync/deploy activity in the last N minutes (uses operation state and sync history timestamps). Results are sorted by most recent activity and include lastSyncAt. Scans all matching applications and may be slow on large instances. Optional.'
           ),
         limit: z
           .number()
@@ -58,9 +66,10 @@ export class Server extends McpServer {
             'Number of applications to skip before returning results. Use with limit for pagination. Optional.'
           )
       },
-      async ({ search, limit, offset }) =>
+      async ({ search, changedWithinMinutes, limit, offset }) =>
         await this.argocdClient.listApplications({
           search: search ?? undefined,
+          changedWithinMinutes,
           limit,
           offset
         })
