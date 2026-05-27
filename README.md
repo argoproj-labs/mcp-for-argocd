@@ -41,7 +41,7 @@ The server provides the following ArgoCD management tools:
 - `list_clusters`: List all clusters registered with ArgoCD
 
 ### Application Management
-- `list_applications`: List and filter all applications
+- `list_applications`: List and filter applications; optional `changedWithinMinutes` limits results to apps with recent sync/deploy activity
 - `get_application`: Get detailed information about a specific application
 - `create_application`: Create a new application
 - `update_application`: Update an existing application

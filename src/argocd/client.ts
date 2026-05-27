@@ -13,6 +13,8 @@ import {
 import { HttpClient } from './http.js';
 
 export class ArgoCDClient {
+  private static readonly TERMINAL_PHASES = new Set(['Succeeded', 'Failed', 'Error']);
+
   private baseUrl: string;
   private apiToken: string;
   private client: HttpClient;
@@ -23,32 +25,133 @@ export class ArgoCDClient {
     this.client = new HttpClient(this.baseUrl, this.apiToken);
   }
 
-  public async listApplications(params?: { search?: string; limit?: number; offset?: number }) {
+  private async fetchApplicationList(search?: string) {
     const { body } = await this.client.get<V1alpha1ApplicationList>(
       `/api/v1/applications`,
-      params?.search ? { search: params.search } : undefined
+      search ? { search } : undefined
     );
+    return body;
+  }
+
+  private stripApplicationFields(app: V1alpha1Application) {
+    return {
+      metadata: {
+        name: app.metadata?.name,
+        namespace: app.metadata?.namespace,
+        labels: app.metadata?.labels,
+        creationTimestamp: app.metadata?.creationTimestamp
+      },
+      spec: {
+        project: app.spec?.project,
+        source: app.spec?.source,
+        destination: app.spec?.destination
+      },
+      status: {
+        sync: app.status?.sync,
+        health: app.status?.health,
+        summary: app.status?.summary
+      }
+    };
+  }
+
+  private parseTimestamp(value?: string) {
+    if (!value) {
+      return null;
+    }
+
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      return null;
+    }
+
+    return parsed;
+  }
+
+  private getLastSyncAt(app: V1alpha1Application) {
+    const candidates: Date[] = [];
+
+    const operationState = app.status?.operationState;
+    const operationFinishedAt = this.parseTimestamp(operationState?.finishedAt);
+    if (operationFinishedAt) {
+      candidates.push(operationFinishedAt);
+    }
+
+    if (operationState?.phase && !ArgoCDClient.TERMINAL_PHASES.has(operationState.phase)) {
+      const operationStartedAt = this.parseTimestamp(operationState?.startedAt);
+      if (operationStartedAt) {
+        candidates.push(operationStartedAt);
+      }
+    }
+
+    for (const historyItem of app.status?.history ?? []) {
+      const deployedAt = this.parseTimestamp(historyItem.deployedAt);
+      if (deployedAt) {
+        candidates.push(deployedAt);
+      }
+
+      const deployStartedAt = this.parseTimestamp(historyItem.deployStartedAt);
+      if (deployStartedAt) {
+        candidates.push(deployStartedAt);
+      }
+    }
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    return candidates.reduce((latest, current) =>
+      current.getTime() > latest.getTime() ? current : latest
+    );
+  }
+
+  public async listApplications(params?: {
+    search?: string;
+    limit?: number;
+    offset?: number;
+    changedWithinMinutes?: number;
+  }) {
+    const body = await this.fetchApplicationList(params?.search);
+
+    if (params?.changedWithinMinutes !== undefined) {
+      const cutoffDate = new Date(Date.now() - params.changedWithinMinutes * 60 * 1000);
+
+      const filteredItems =
+        body.items
+          ?.map((app) => {
+            const lastSyncAt = this.getLastSyncAt(app);
+            if (!lastSyncAt || lastSyncAt.getTime() < cutoffDate.getTime()) {
+              return null;
+            }
+
+            return {
+              ...this.stripApplicationFields(app),
+              lastSyncAt: lastSyncAt.toISOString()
+            };
+          })
+          .filter((app): app is NonNullable<typeof app> => app !== null)
+          .sort(
+            (a, b) => new Date(b.lastSyncAt).getTime() - new Date(a.lastSyncAt).getTime()
+          ) ?? [];
+
+      const start = params.offset ?? 0;
+      const end = params.limit ? start + params.limit : filteredItems.length;
+      const items = filteredItems.slice(start, end);
+
+      return {
+        items,
+        metadata: {
+          resourceVersion: body.metadata?.resourceVersion,
+          changedWithinMinutes: params.changedWithinMinutes,
+          cutoffTime: cutoffDate.toISOString(),
+          totalItems: filteredItems.length,
+          returnedItems: items.length,
+          hasMore: end < filteredItems.length
+        }
+      };
+    }
 
     // Strip heavy fields to reduce token usage
-    const strippedItems =
-      body.items?.map((app) => ({
-        metadata: {
-          name: app.metadata?.name,
-          namespace: app.metadata?.namespace,
-          labels: app.metadata?.labels,
-          creationTimestamp: app.metadata?.creationTimestamp
-        },
-        spec: {
-          project: app.spec?.project,
-          source: app.spec?.source,
-          destination: app.spec?.destination
-        },
-        status: {
-          sync: app.status?.sync,
-          health: app.status?.health,
-          summary: app.status?.summary
-        }
-      })) ?? [];
+    const strippedItems = body.items?.map((app) => this.stripApplicationFields(app)) ?? [];
 
     // Apply pagination
     const start = params?.offset ?? 0;
