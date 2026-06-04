@@ -49,6 +49,15 @@ export const connectSSETransport = (port: number) => {
   app.listen(port);
 };
 
+// Resolve the session-level ArgoCD credentials from headers or env.
+//
+// The API token is MANDATORY and is only ever accepted here (x-argocd-api-token
+// header or ARGOCD_API_TOKEN env var) — never as a tool-call argument — so the
+// secret stays in the transport layer and out of prompts/model context. The
+// connection is rejected when no token is provided.
+//
+// The base URL is optional at this level: when it is absent, callers may supply
+// it per call via the argocdBaseUrl tool argument.
 const resolveCredentials = (
   req: express.Request,
   res: express.Response
@@ -57,8 +66,12 @@ const resolveCredentials = (
     (req.headers['x-argocd-base-url'] as string) || process.env.ARGOCD_BASE_URL || '';
   const argocdApiToken =
     (req.headers['x-argocd-api-token'] as string) || process.env.ARGOCD_API_TOKEN || '';
-  if (!argocdBaseUrl || !argocdApiToken) {
-    res.status(400).send('x-argocd-base-url and x-argocd-api-token must be provided in headers.');
+  if (!argocdApiToken) {
+    res
+      .status(400)
+      .send(
+        'x-argocd-api-token must be provided in the request header (or the ARGOCD_API_TOKEN env var).'
+      );
     return null;
   }
   return { argocdBaseUrl, argocdApiToken };

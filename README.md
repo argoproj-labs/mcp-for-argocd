@@ -147,6 +147,81 @@ This disables TLS certificate validation for Node.js when connecting to Argo CD 
 > **Warning**: Disabling SSL verification reduces security. Use this setting only in development environments or when you understand the security implications.
 
 
+### Providing ArgoCD Credentials
+
+The server connects to ArgoCD using a **base URL** and an **API token**.
+
+#### API token — header / env var only (mandatory)
+
+The ArgoCD **API token is a secret and is only ever read from the transport layer**, never from a tool-call argument:
+
+- **HTTP headers** (HTTP transport only): `x-argocd-api-token`.
+- **Environment variables**: `ARGOCD_API_TOKEN` (all transports).
+
+The token is **mandatory**. On the HTTP transport, a connection that supplies no token (neither header nor env var) is rejected with `400 Bad Request`. Keeping the token out of tool arguments ensures it never enters prompts, model context, or tool-call logs.
+
+#### Base URL — header / env var, or per-call argument
+
+The base URL may be supplied at the session level (resolved once when the server starts or when an HTTP client connects):
+
+- **HTTP headers** (HTTP transport only): `x-argocd-base-url`.
+- **Environment variables**: `ARGOCD_BASE_URL` (all transports).
+
+In addition, **every tool accepts an optional `argocdBaseUrl` argument**:
+
+- If a session default base URL exists, `argocdBaseUrl` is **optional** and overrides the default for that single call.
+- If no session default base URL is configured (header and env var both absent), `argocdBaseUrl` is **required**; a call without it returns an error.
+
+For example, a `tools/call` request overriding only the base URL:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "list_applications",
+    "arguments": {
+      "argocdBaseUrl": "https://argocd.other-cluster.example.com"
+    }
+  }
+}
+```
+
+> **Limitation — the per-call base URL reuses the session token.** Base URL and token are a coupled pair: each ArgoCD instance issues its own API token, but only the base URL can be overridden per call. The session token (from `x-argocd-api-token` / `ARGOCD_API_TOKEN`, captured when the session is initialized) is reused against whatever base URL is supplied. Overriding `argocdBaseUrl` to point at a **different** instance therefore only works if that instance accepts the same token; otherwise the call fails with `401`. To target instances that require **distinct** tokens, see the multi-instance pattern below.
+
+#### Targeting multiple instances with distinct tokens (stateless + payload-aware proxy)
+
+The recommended way to route to multiple ArgoCD instances — each with its own token — without ever putting the token in a tool-call payload is to run the server in [**stateless mode**](#stateless-mode) behind a proxy that injects the credential headers per request.
+
+The catch is *which instance to inject a token for*. In practice the **agent harness chooses the target instance, and the only channel it controls is the JSON-RPC body** — an MCP client/agent can set the `argocdBaseUrl` tool argument, but it cannot set arbitrary HTTP headers like `x-argocd-base-url`. So the proxy cannot rely on a header the agent set; instead it must **parse the request body, extract `params.arguments.argocdBaseUrl`, look up the matching token, and inject the correctly-paired `x-argocd-base-url` and `x-argocd-api-token` headers** before forwarding the request.
+
+In stateless mode the server resolves `x-argocd-base-url` / `x-argocd-api-token` **fresh on every request** (in the default stateful mode the headers are read only once, at session initialization, and reused for the whole session — so dynamic per-request injection has no effect there).
+
+```
+                          reads body, extracts params.arguments.argocdBaseUrl
+                          looks up matching token, injects PAIRED headers
+                                            │
+client / agent ──▶ proxy ──────────────────┴───────────────▶ MCP (stateless)
+   sets argocdBaseUrl       ┌── x-argocd-base-url:  <from payload> ──┐
+   in tool args (body)      └── x-argocd-api-token: <token for that base url> ──┘
+```
+
+Notes / caveats of this approach:
+
+- The proxy must parse JSON-RPC bodies and maintain a `baseUrl → token` map. This couples the proxy to the MCP message schema and to the tool-argument name (`argocdBaseUrl`).
+- The proxy must inject **both** headers together so the base URL and token stay a matched pair.
+- The token never enters the model context, prompt, or tool-call logs — it lives only in the request header injected by the proxy. The base URL, however, is still in the payload (it is not a secret).
+- Streaming/batched requests and non-`tools/call` methods (e.g. `tools/list`) won't carry an `argocdBaseUrl`; the proxy needs a sensible default for those.
+
+##### Better alternatives to a payload-parsing proxy
+
+Parsing the body in the proxy works but is brittle. If you control the server, these are cleaner ways to solve the coupled base-URL/token problem:
+
+1. **Server-side credential map (recommended).** Configure the server with a `baseUrl → token` (or `name → {baseUrl, token}`) map via env/secret. The caller passes only a non-secret selector — `argocdBaseUrl` or a logical `argocdInstance` name — and the server looks up the paired token itself. No proxy, no body parsing, token never in the payload, and base URL/token can never drift out of sync. This is the most robust fit for the "agent picks the instance per call" use case.
+2. **One connection per instance.** Bind each session to a single instance by sending that instance's `x-argocd-base-url` + `x-argocd-api-token` at connection time, and open a separate connection per instance. Works today with zero proxy logic; the trade-off is the agent manages multiple MCP endpoints instead of one.
+3. **Proxy keyed on transport metadata, not the body.** If a payload-aware proxy is undesirable, have the proxy route on something it can see without parsing the body — the request path (`/mcp/prod`, `/mcp/staging`), an auth claim, or a dedicated routing header the *deployment* (not the agent) sets — and inject the paired headers from that. This keeps the agent out of base-URL selection entirely.
+
 ### Read Only Mode
 
 If you want to run the MCP Server in a ReadOnly mode to avoid resource or application modification, you should set the environment variable:
@@ -181,7 +256,7 @@ docker run -e ARGOCD_BASE_URL=<argocd_url> -e ARGOCD_API_TOKEN=<argocd_token> \
 
 In stateless mode:
 - No `Mcp-Session-Id` is returned or required — any replica can handle any request
-- ArgoCD credentials must be supplied on every request via environment variables or `x-argocd-base-url` / `x-argocd-api-token` headers
+- ArgoCD credentials must be supplied on every request via environment variables or `x-argocd-base-url` / `x-argocd-api-token` headers (the base URL may also be overridden per call via the `argocdBaseUrl` tool argument; the API token is always header/env only)
 - `GET /mcp` and `DELETE /mcp` return `405 Method Not Allowed` (session-level SSE and termination are not supported)
 
 This mode is recommended for Kubernetes deployments with Horizontal Pod Autoscaling (HPA) where network-level sticky sessions are not available.
