@@ -42,6 +42,7 @@
     "lint:fix": "eslint src/**/*.ts --fix",
     "build": "tsup",
     "build:watch": "tsup --watch",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "generate-types": "dtsgen -c dtsgen.json -o src/types/argocd.d.ts swagger.json"
   },
   "author": "Argo Proj Contributors.",

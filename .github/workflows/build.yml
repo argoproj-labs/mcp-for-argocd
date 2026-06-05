@@ -25,5 +25,7 @@ jobs:
       - name: Lint
         run:
           pnpm run lint
+      - name: Test
+        run: pnpm test
       - name: Create npm package
         run: pnpm pack

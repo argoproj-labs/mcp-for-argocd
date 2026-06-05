@@ -15,7 +15,7 @@ type ServerInfo = {
   argocdBaseUrl: string;
   argocdApiToken: string;
   // Optional registry mapping additional ArgoCD base URLs to their tokens. When
-  // omitted, it is loaded from the ARGOCD_TOKEN_REGISTRY env var.
+  // omitted, it is loaded from the ARGOCD_TOKEN_REGISTRY_PATH env var.
   tokenRegistry?: TokenRegistry;
 };
 

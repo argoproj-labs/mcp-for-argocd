@@ -33,8 +33,9 @@ export class TokenRegistry {
   constructor(entries: TokenRegistryEntry[] = []) {
     for (const entry of entries) {
       if (!entry.baseUrl || !entry.token) {
-        logger.warn('Ignoring ArgoCD token registry entry missing baseUrl or token');
-        continue;
+        // Fail closed: a missing baseUrl/token is a misconfigured credential,
+        // not something to silently skip. Don't include the token in the error.
+        throw new Error('ArgoCD token registry entry is missing baseUrl or token');
       }
       this.tokensByBaseUrl.set(TokenRegistry.normalize(entry.baseUrl), entry.token);
     }
@@ -68,30 +69,30 @@ export class TokenRegistry {
 }
 
 // Parse the raw JSON contents of a token registry file into a TokenRegistry.
-// Logs and returns an empty registry when the contents are not a JSON array
-// (fail-open: the server still works with its single default credential).
+// Throws when the contents are not valid JSON or not a JSON array: an operator
+// who configured a registry file expects token routing, so a malformed file is
+// a misconfiguration we surface loudly rather than silently degrade.
 export const parseTokenRegistry = (raw: string): TokenRegistry => {
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      logger.warn('ArgoCD token registry file must contain a JSON array; ignoring it');
-      return new TokenRegistry();
-    }
-    return new TokenRegistry(parsed as TokenRegistryEntry[]);
+    parsed = JSON.parse(raw);
   } catch (error) {
-    logger.warn(
-      `Failed to parse ArgoCD token registry file as JSON; ignoring it: ${
-        error instanceof Error ? error.message : String(error)
-      }`
+    throw new Error(
+      `ArgoCD token registry file is not valid JSON: ${error instanceof Error ? error.message : String(error)}`
     );
-    return new TokenRegistry();
   }
+  if (!Array.isArray(parsed)) {
+    throw new Error('ArgoCD token registry file must contain a JSON array');
+  }
+  return new TokenRegistry(parsed as TokenRegistryEntry[]);
 };
 
 // Build a TokenRegistry from the JSON file at ARGOCD_TOKEN_REGISTRY_PATH.
-// Returns an empty registry when the variable is unset. Logs and returns an
-// empty registry when the file cannot be read or is malformed (fail-open: the
-// server still works with its single default credential).
+// Returns an empty registry when the variable is unset (the server then runs on
+// its single default credential). When the variable IS set, this fails closed:
+// if the file cannot be read or is malformed it throws, so the process crashes
+// at startup rather than silently falling back to the default credential — which
+// could route calls to an instance with the wrong token.
 export const tokenRegistryFromEnv = (
   registryPath: string | undefined = process.env.ARGOCD_TOKEN_REGISTRY_PATH
 ): TokenRegistry => {
@@ -102,12 +103,9 @@ export const tokenRegistryFromEnv = (
   try {
     raw = readFileSync(registryPath.trim(), 'utf8');
   } catch (error) {
-    logger.warn(
-      `Failed to read ArgoCD token registry file at "${registryPath}"; ignoring it: ${
-        error instanceof Error ? error.message : String(error)
-      }`
+    throw new Error(
+      `Failed to read ArgoCD token registry file at "${registryPath}": ${error instanceof Error ? error.message : String(error)}`
     );
-    return new TokenRegistry();
   }
   const registry = parseTokenRegistry(raw);
   logger.info(
