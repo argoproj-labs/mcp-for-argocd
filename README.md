@@ -199,11 +199,11 @@ The catch is *which instance to inject a token for*. In practice the **agent har
 In stateless mode the server resolves `x-argocd-base-url` / `x-argocd-api-token` **fresh on every request** (in the default stateful mode the headers are read only once, at session initialization, and reused for the whole session — so dynamic per-request injection has no effect there).
 
 ```
-                          reads body, extracts params.arguments.argocdBaseUrl
-                          looks up matching token, injects PAIRED headers
-                                            │
+                     reads body, extracts params.arguments.argocdBaseUrl
+                     looks up matching token, injects PAIRED headers
+                                           │
 client / agent ──▶ proxy ──────────────────┴───────────────▶ MCP (stateless)
-   sets argocdBaseUrl       ┌── x-argocd-base-url:  <from payload> ──┐
+   sets argocdBaseUrl       ┌── x-argocd-base-url:  <from payload>            ──┐
    in tool args (body)      └── x-argocd-api-token: <token for that base url> ──┘
 ```
 
