@@ -194,25 +194,47 @@ For example, a `tools/call` request overriding only the base URL:
 
 The recommended way to route to multiple ArgoCD instances — each with its own token — without ever putting the token in a tool-call payload is to run the server in [**stateless mode**](#stateless-mode) behind a proxy that injects the credential headers per request.
 
-The catch is *which instance to inject a token for*. In practice the **agent harness chooses the target instance, and the only channel it controls is the JSON-RPC body** — an MCP client/agent can set the `argocdBaseUrl` tool argument, but it cannot set arbitrary HTTP headers like `x-argocd-base-url`. So the proxy cannot rely on a header the agent set; instead it must **parse the request body, extract `params.arguments.argocdBaseUrl`, look up the matching token, and inject the correctly-paired `x-argocd-base-url` and `x-argocd-api-token` headers** before forwarding the request.
+The catch is *which instance to inject a token for*. In practice the **agent harness chooses the target instance, and the only channel it controls is the JSON-RPC body** — an MCP client/agent can set the `argocdBaseUrl` tool argument, but it cannot set arbitrary HTTP headers like `x-argocd-base-url`. So the proxy cannot rely on a header the agent set; instead it must **parse the request body, extract `params.arguments.argocdBaseUrl`, look up the matching token, and inject the `x-argocd-api-token` header** before forwarding the request.
+
+Note that the proxy only needs to inject the **token** header. The base URL is consumed directly from the payload's `argocdBaseUrl` argument: when no `x-argocd-base-url` header (and no `ARGOCD_BASE_URL` env var) is set, the server has no session-default base URL, so the per-call `argocdBaseUrl` argument is what gets used — paired with the session token. The proxy may re-inject `x-argocd-base-url` if it wants a session-level default, but it is not required for this pattern.
 
 In stateless mode the server resolves `x-argocd-base-url` / `x-argocd-api-token` **fresh on every request** (in the default stateful mode the headers are read only once, at session initialization, and reused for the whole session — so dynamic per-request injection has no effect there).
 
 ```
-                     reads body, extracts params.arguments.argocdBaseUrl
-                     looks up matching token, injects PAIRED headers
-                                           │
-client / agent ──▶ proxy ──────────────────┴───────────────▶ MCP (stateless)
-   sets argocdBaseUrl       ┌── x-argocd-base-url:  <from payload>            ──┐
-   in tool args (body)      └── x-argocd-api-token: <token for that base url> ──┘
+┌─────────────────────────────────────────────────────────────┐
+│ 1. CLIENT / AGENT                                           │
+│    Sends a tools/call request. The target instance's base   │
+│    URL travels in the JSON-RPC body (no token, no headers): │
+│                                                             │
+│      { "method": "tools/call", "params": { "arguments": {   │
+│          "argocdBaseUrl": "https://argo-a.example.com" }}}  │
+└───────────────────────────────┬─────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│ 2. PROXY                                                     │
+│    a) Reads the body, extracts params.arguments.argocdBaseUrl│
+│    b) Looks it up in a baseUrl → token map                   │
+│    c) Injects ONLY the token header:                         │
+│         x-argocd-api-token: <token for argo-a>               │
+│    (the body, incl. argocdBaseUrl, is forwarded unchanged)   │
+└───────────────────────────────┬──────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│ 3. MCP SERVER (stateless)                                    │
+│    • token  ← from the x-argocd-api-token header             │
+│    • baseURL ← from the argocdBaseUrl arg in the body        │
+│    Pairs them and calls https://argo-a.example.com.          │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 Notes / caveats of this approach:
 
 - The proxy must parse JSON-RPC bodies and maintain a `baseUrl → token` map. This couples the proxy to the MCP message schema and to the tool-argument name (`argocdBaseUrl`).
-- The proxy must inject **both** headers together so the base URL and token stay a matched pair.
+- Because there is no session-default base URL in this setup, **every** tool call must carry `argocdBaseUrl` in its arguments; a call that omits it is rejected with a "Missing required ArgoCD base URL" error. (Injecting `x-argocd-base-url` would provide a fallback, but then base URL and token must stay a matched pair.)
 - The token never enters the model context, prompt, or tool-call logs — it lives only in the request header injected by the proxy. The base URL, however, is still in the payload (it is not a secret).
-- Streaming/batched requests and non-`tools/call` methods (e.g. `tools/list`) won't carry an `argocdBaseUrl`; the proxy needs a sensible default for those.
+- Streaming/batched requests and non-`tools/call` methods (e.g. `tools/list`) won't carry an `argocdBaseUrl`; since they don't talk to ArgoCD they don't need one, but be aware the proxy can't read a base URL from them.
 
 ##### Better alternatives to a payload-parsing proxy
 
