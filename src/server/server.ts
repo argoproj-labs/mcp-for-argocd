@@ -23,7 +23,7 @@ type ServerInfo = {
 // The API token is deliberately NOT a tool argument: it is only ever resolved
 // from the x-argocd-api-token header / ARGOCD_API_TOKEN env var so the secret
 // never enters prompts, model context, or tool-call logs.
-const credentialArgsSchema = {
+const argoCDArgsSchema = {
   argocdBaseUrl: z
     .string()
     .optional()
@@ -32,7 +32,7 @@ const credentialArgsSchema = {
     )
 } satisfies ZodRawShape;
 
-type CredentialArgs = {
+type ArgoCDArgs = {
   argocdBaseUrl?: string;
 };
 
@@ -381,7 +381,7 @@ export class Server extends McpServer {
   // that pairs the token to the requested base URL, or use a server-side
   // baseUrl->token map (see "Targeting multiple instances with distinct tokens"
   // in the README).
-  private resolveClient(args: CredentialArgs): ArgoCDClient {
+  private resolveClient(args: ArgoCDArgs): ArgoCDClient {
     const baseUrl = args.argocdBaseUrl || this.defaultBaseUrl;
     const apiToken = this.defaultApiToken;
 
@@ -421,11 +421,11 @@ export class Server extends McpServer {
       extra: Parameters<ToolCallback<Args>>[1]
     ) => T
   ) {
-    const mergedSchema = { ...paramsSchema, ...credentialArgsSchema } as ZodRawShape;
+    const mergedSchema = { ...paramsSchema, ...argoCDArgsSchema } as ZodRawShape;
     this.tool(name, description, mergedSchema, async (...args) => {
       try {
         const [allArgs, extra] = args as [
-          Parameters<ToolCallback<Args>>[0] & CredentialArgs,
+          Parameters<ToolCallback<Args>>[0] & ArgoCDArgs,
           Parameters<ToolCallback<Args>>[1]
         ];
         // Strip credential args before handing the rest to the tool callback.
