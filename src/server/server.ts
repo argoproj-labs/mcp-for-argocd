@@ -9,10 +9,14 @@ import {
   ApplicationSchema,
   ResourceRefSchema
 } from '../shared/models/schema.js';
+import { TokenRegistry, tokenRegistryFromEnv } from './tokenRegistry.js';
 
 type ServerInfo = {
   argocdBaseUrl: string;
   argocdApiToken: string;
+  // Optional registry mapping additional ArgoCD base URLs to their tokens. When
+  // omitted, it is loaded from the ARGOCD_TOKEN_REGISTRY env var.
+  tokenRegistry?: TokenRegistry;
 };
 
 // Per-call argument that any tool may accept to target a specific ArgoCD
@@ -39,8 +43,11 @@ type ArgoCDArgs = {
 export class Server extends McpServer {
   private defaultBaseUrl: string;
   private defaultApiToken: string;
+  private tokenRegistry: TokenRegistry;
   private argocdClient: ArgoCDClient;
-  // Cache per-credential clients to avoid rebuilding the HttpClient on every call.
+  // Cache per-credential clients to avoid rebuilding the HttpClient on every
+  // call. Keyed by baseUrl + token, since the same base URL may resolve to
+  // different tokens (request token vs. registry token vs. default).
   private clientCache = new Map<string, ArgoCDClient>();
 
   constructor(serverInfo: ServerInfo) {
@@ -50,6 +57,7 @@ export class Server extends McpServer {
     });
     this.defaultBaseUrl = serverInfo.argocdBaseUrl;
     this.defaultApiToken = serverInfo.argocdApiToken;
+    this.tokenRegistry = serverInfo.tokenRegistry ?? tokenRegistryFromEnv();
     this.argocdClient = new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
 
     const isReadOnly =
@@ -368,26 +376,23 @@ export class Server extends McpServer {
   }
 
   // Resolve the ArgoCD client to use for a single tool call. The base URL may be
-  // overridden per call via the argocdBaseUrl argument; the API token always
-  // comes from the session default (x-argocd-api-token header / ARGOCD_API_TOKEN
-  // env var) and is never accepted as a tool argument.
+  // overridden per call via the argocdBaseUrl argument; the API token is never a
+  // tool argument and is resolved by the following precedence:
   //
-  // LIMITATION: base URL and token are a coupled pair per ArgoCD instance, but
-  // only the base URL can be overridden per call — the session token is reused
-  // against whatever base URL is supplied. Overriding argocdBaseUrl to point at
-  // a *different* ArgoCD instance therefore only works if that instance accepts
-  // the same token; otherwise the call fails with 401. To target instances that
-  // require distinct tokens, run in stateless mode behind a payload-aware proxy
-  // that pairs the token to the requested base URL, or use a server-side
-  // baseUrl->token map (see "Targeting multiple instances with distinct tokens"
-  // in the README).
+  //   1. Request token  — the session token from the x-argocd-api-token header /
+  //      ARGOCD_API_TOKEN env var. If the caller supplied one, it ALWAYS wins.
+  //   2. Registry token — when no request token was supplied, look the resolved
+  //      base URL up in the configured token registry (ARGOCD_TOKEN_REGISTRY)
+  //      and use its token if the base URL is registered.
+  //
+  // This lets a single server target multiple ArgoCD instances, each with its
+  // own token, without the token ever appearing in a tool-call payload: callers
+  // pass only the (non-secret) base URL and the server pairs it with the token.
   private resolveClient(args: ArgoCDArgs): ArgoCDClient {
     const baseUrl = args.argocdBaseUrl || this.defaultBaseUrl;
-    const apiToken = this.defaultApiToken;
 
-    // The API token is mandatory and enforced at connect time, so it is always
-    // present here. The base URL is optional at the session level; when no
-    // default is configured, the caller must supply the argocdBaseUrl argument.
+    // The base URL is optional at the session level; when no default is
+    // configured, the caller must supply the argocdBaseUrl argument.
     if (!baseUrl) {
       throw new Error(
         'Missing required ArgoCD base URL: argocdBaseUrl. ' +
@@ -396,17 +401,30 @@ export class Server extends McpServer {
       );
     }
 
-    // Fast path: base URL not overridden, use the default session client.
-    if (baseUrl === this.defaultBaseUrl) {
+    // Precedence: an explicitly supplied request/session token wins; otherwise
+    // fall back to a token configured for this base URL in the registry.
+    const apiToken = this.defaultApiToken || this.tokenRegistry.getToken(baseUrl);
+
+    if (!apiToken) {
+      throw new Error(
+        `Missing required ArgoCD API token for base URL "${baseUrl}". ` +
+          'Provide it via the x-argocd-api-token header / ARGOCD_API_TOKEN env var, ' +
+          'or register a token for this base URL in ARGOCD_TOKEN_REGISTRY.'
+      );
+    }
+
+    // Fast path: default base URL with the default token — reuse the session client.
+    if (baseUrl === this.defaultBaseUrl && apiToken === this.defaultApiToken) {
       return this.argocdClient;
     }
 
-    // Cache per-base-url clients to avoid rebuilding the HttpClient on every
-    // call. The token is constant for the session, so it is not part of the key.
-    let client = this.clientCache.get(baseUrl);
+    // Cache clients keyed by baseUrl + token: the same base URL can resolve to
+    // different tokens depending on whether a request token was supplied.
+    const cacheKey = `${baseUrl} ${apiToken}`;
+    let client = this.clientCache.get(cacheKey);
     if (!client) {
       client = new ArgoCDClient(baseUrl, apiToken);
-      this.clientCache.set(baseUrl, client);
+      this.clientCache.set(cacheKey, client);
     }
     return client;
   }
