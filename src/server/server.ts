@@ -352,7 +352,10 @@ export class Server extends McpServer {
     description: string,
     paramsSchema: Args,
     cb: (...cbArgs: Parameters<ToolCallback<Args>>) => T,
-    annotations: { readOnlyHint?: boolean; destructiveHint?: boolean } = { readOnlyHint: true }
+    annotations: { readOnlyHint?: boolean; destructiveHint?: boolean } = {
+      readOnlyHint: true,
+      destructiveHint: false
+    }
   ) {
     this.tool(name, description, paramsSchema as ZodRawShape, annotations, async (...args) => {
       try {
