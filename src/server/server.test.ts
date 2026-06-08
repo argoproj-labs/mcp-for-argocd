@@ -16,6 +16,10 @@ import { TokenRegistry } from './tokenRegistry.js';
 const DEFAULT_BASE_URL = 'https://argocd.internal.example.com';
 const DEFAULT_TOKEN = 'default-secret-token';
 const EVIL_BASE_URL = 'https://evil.example.com';
+// A legitimately registered second instance (distinct from the default), used to
+// prove that the presence of an unrelated registry entry doesn't change how the
+// default base URL resolves its token.
+const OTHER_BASE_URL = 'https://argocd.other.example.com';
 
 // Invoke a registered tool's handler with the given arguments and return the
 // raw CallTool result ({ isError, content: [{ text }] }).
@@ -116,10 +120,10 @@ test('overriding argocdBaseUrl to the default instance reuses the session token 
   // The README invariant: overriding argocdBaseUrl to the DEFAULT instance
   // (same host, formatting aside) reuses the session token, while pointing it at
   // any OTHER instance requires a registry entry. Here a registry exists with an
-  // entry for a *different* host; overriding to the default host (differently
-  // formatted) must still resolve the default session token, not fail or consult
-  // the registry.
-  const registry = new TokenRegistry([{ baseUrl: EVIL_BASE_URL, token: 'registered-token' }]);
+  // entry for a *different* registered host; overriding to the default host
+  // (differently formatted) must still resolve the default session token, not
+  // fail or consult the registry.
+  const registry = new TokenRegistry([{ baseUrl: OTHER_BASE_URL, token: 'registered-token' }]);
   const server = createServer({
     argocdBaseUrl: DEFAULT_BASE_URL,
     argocdApiToken: DEFAULT_TOKEN,
