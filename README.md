@@ -191,6 +191,8 @@ The file contains a JSON array mapping a base URL to the token that should be us
 
 > **Secure the file.** Restrict it to the server's user (e.g. `chmod 400`) and prefer a secret-management mechanism (Kubernetes secret volume, Vault agent, etc.) over a plaintext file on disk.
 
+> **Local development.** The `make run` / `make dev` targets run without a registry by default; pass `ARGOCD_TOKEN_REGISTRY_PATH=/path/to/tokens.json` to use one. Do **not** place the file under `dist/` — `tsup` runs with `clean: true` and wipes that directory on every build. See [Running locally](#running-locally).
+
 With a registry configured, a caller targets an instance by passing only the (non-secret) `argocdBaseUrl` argument; the server pairs it with the registered token. The token never appears in the tool-call payload.
 
 **Token resolution** for a given call depends on whether the call targets the **default base URL** (the one from `x-argocd-base-url` / `ARGOCD_BASE_URL`) or an **overridden** base URL (a different value supplied via the `argocdBaseUrl` tool argument):
@@ -278,6 +280,71 @@ pnpm install
 pnpm run dev
 ```
 Once the server is running, you can utilize the MCP server within Visual Studio Code or other MCP client.
+
+### Running locally
+
+The `Makefile` provides targets for running the server over the HTTP transport:
+
+```bash
+make run    # build, then run the HTTP server (production-style)
+make dev    # run from source with hot reloading (tsx watch)
+```
+
+By default neither target sets any credentials — the server starts with no default base URL or token, so callers must supply them per request (`x-argocd-base-url` / `x-argocd-api-token` headers, or the `argocdBaseUrl` tool argument once a registry is configured). Override the port the same way:
+
+```bash
+make run PORT=4000
+```
+
+To configure credentials, export the relevant environment variable on the command line. There are three (all optional):
+
+| Variable | Purpose |
+|---|---|
+| `ARGOCD_BASE_URL` | Default ArgoCD instance URL used when a call doesn't override it. |
+| `ARGOCD_API_TOKEN` | Static API token for the default base URL. |
+| `ARGOCD_TOKEN_REGISTRY_PATH` | Path to a JSON [token registry](#token-registry--per-base-url-tokens-multi-instance) mapping base URLs to tokens (for targeting multiple instances). |
+
+```bash
+# Single instance with a static base URL + token:
+make run ARGOCD_BASE_URL=https://argo.example.com ARGOCD_API_TOKEN=<token>
+
+# Multiple instances via a token registry:
+make run ARGOCD_TOKEN_REGISTRY_PATH=/path/to/tokens.json
+
+# Both — a default instance plus extra instances resolved from the registry:
+make dev ARGOCD_BASE_URL=https://argo.example.com ARGOCD_API_TOKEN=<token> \
+  ARGOCD_TOKEN_REGISTRY_PATH=/path/to/tokens.json
+```
+
+See [Token resolution](#token-registry--per-base-url-tokens-multi-instance) for how the default token and registry interact. If `ARGOCD_TOKEN_REGISTRY_PATH` is set but the file is missing, unreadable, or malformed, the server fails closed at startup.
+
+> **Keep tokens out of your shell history.** Passing `ARGOCD_API_TOKEN=<token>` directly on the `make` command line records the secret in your shell history and exposes it in the process list. Prefer exporting it in the shell first so it never appears in the `make` invocation:
+> ```bash
+> export ARGOCD_API_TOKEN=<token>
+> make run ARGOCD_BASE_URL=https://argo.example.com
+> ```
+> A registry path (`ARGOCD_TOKEN_REGISTRY_PATH`) and base URL are not secrets, so they're fine to pass inline.
+
+> Do not place the registry file under `dist/` — `tsup` builds with `clean: true` and wipes that directory on every build.
+
+The HTTP server listens on `POST /mcp` (port `3000` by default) with a `GET /healthz` liveness endpoint. To send a request, first `initialize` a session (capture the `mcp-session-id` response header), then call a tool, passing one of the registered base URLs as the `argocdBaseUrl` argument:
+
+```bash
+# 1. Initialize a session — note the mcp-session-id response header
+curl -sD - http://localhost:3000/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
+
+# 2. Call a tool, reusing that session id
+curl -s http://localhost:3000/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'mcp-session-id: <session-id-from-step-1>' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_applications","arguments":{"argocdBaseUrl":"https://argo-a.example.com"}}}'
+```
+
+To avoid managing a session id, run in [stateless mode](#stateless-mode) (`node dist/index.js http --stateless`) so every `POST /mcp` is self-contained.
 
 ### Upgrading ArgoCD Types
 
