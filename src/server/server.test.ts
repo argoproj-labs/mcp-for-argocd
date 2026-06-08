@@ -112,6 +112,50 @@ test('default base URL match is normalized (trailing slash / case)', async () =>
   assert.equal(client.client.apiToken, DEFAULT_TOKEN);
 });
 
+test('overriding argocdBaseUrl to the default instance reuses the session token (registry present)', async () => {
+  // The README invariant: overriding argocdBaseUrl to the DEFAULT instance
+  // (same host, formatting aside) reuses the session token, while pointing it at
+  // any OTHER instance requires a registry entry. Here a registry exists with an
+  // entry for a *different* host; overriding to the default host (differently
+  // formatted) must still resolve the default session token, not fail or consult
+  // the registry.
+  const registry = new TokenRegistry([{ baseUrl: EVIL_BASE_URL, token: 'registered-token' }]);
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: registry
+  });
+
+  const client = (
+    server as unknown as {
+      resolveClient: (a: { argocdBaseUrl?: string }) => unknown;
+    }
+  ).resolveClient({ argocdBaseUrl: `${DEFAULT_BASE_URL.toUpperCase()}/` }) as {
+    client: { apiToken: string };
+  };
+
+  assert.equal(client.client.apiToken, DEFAULT_TOKEN);
+});
+
+test('overriding argocdBaseUrl to a different instance with no registry entry sends no request', async () => {
+  // The README invariant's failure mode: pointing argocdBaseUrl at an instance
+  // that is NOT in the registry must fail with "Missing required ArgoCD API
+  // token" before any HTTP request is made — even though a valid default token
+  // exists for the default host, it must never be sent to the other host.
+  const registry = new TokenRegistry([{ baseUrl: DEFAULT_BASE_URL, token: 'registered-default' }]);
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: registry
+  });
+
+  const result = await callTool(server, 'list_applications', { argocdBaseUrl: EVIL_BASE_URL });
+
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /Missing required ArgoCD API token/);
+  assert.match(textOf(result), new RegExp(EVIL_BASE_URL));
+});
+
 test('with no default token, an overridden URL still resolves only from the registry', async () => {
   // Tokenless session (allowed when a registry is configured). The default token
   // is empty, so even the default URL has no token, and an unregistered override

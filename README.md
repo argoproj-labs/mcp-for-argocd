@@ -158,7 +158,7 @@ The ArgoCD **API token is a secret and is only ever read from the transport laye
 - **HTTP headers** (HTTP transport only): `x-argocd-api-token`.
 - **Environment variables**: `ARGOCD_API_TOKEN` (all transports).
 
-The token is **mandatory**. On the HTTP transport, a connection that supplies no token (neither header nor env var) is rejected with `400 Bad Request`. Keeping the token out of tool arguments ensures it never enters prompts, model context, or tool-call logs.
+This is the **default token**. It is **mandatory unless a [token registry](#token-registry--per-base-url-tokens-multi-instance) is configured**: on the HTTP transport, a connection that supplies no token (neither header nor env var) is rejected with `400 Bad Request`, but when a registry is configured a tokenless connection is allowed because each call resolves its own [registry token](#two-kinds-of-token). Keeping the token out of tool arguments ensures it never enters prompts, model context, or tool-call logs.
 
 #### Base URL — header / env var, or per-call argument
 
@@ -195,11 +195,26 @@ The file contains a JSON array mapping a base URL to the token that should be us
 
 With a registry configured, a caller targets an instance by passing only the (non-secret) `argocdBaseUrl` argument; the server pairs it with the registered token. The token never appears in the tool-call payload.
 
-**Token resolution** for a given call depends on whether the call targets the **default base URL** (the one from `x-argocd-base-url` / `ARGOCD_BASE_URL`) or an **overridden** base URL (a different value supplied via the `argocdBaseUrl` tool argument):
+##### Two kinds of token
 
-1. **Default base URL** → the session token (`x-argocd-api-token` header / `ARGOCD_API_TOKEN` env var) is used; if none was supplied, the registry is consulted for that base URL.
-2. **Overridden base URL** → the token is taken **only** from the registry entry for that base URL. The session/default token is **never** sent to a base URL other than the default one.
-3. If no token can be resolved for the requested base URL, the call returns a "Missing required ArgoCD API token" error and **no request is made** to that host.
+The server resolves calls using one of two distinct tokens. Keeping them straight is what makes the security model work:
+
+| | **Default token** | **Registry token** |
+|---|---|---|
+| **Source** | `x-argocd-api-token` header / `ARGOCD_API_TOKEN` env var (the session credential) | A `token` entry in the `ARGOCD_TOKEN_REGISTRY_PATH` JSON file, keyed by `baseUrl` |
+| **Scope** | The **default base URL only** (`x-argocd-base-url` / `ARGOCD_BASE_URL`) | The **specific base URL** its entry is keyed to |
+| **Used for** | A call that targets the default base URL | A call that targets any base URL present in the registry (including the default, as a fallback) |
+| **Never used for** | Any base URL other than the default — it is **never** sent to a different host | Any base URL not registered |
+
+The cardinal rule: **the default token is bound to the default base URL; every other host's token must come from the registry.** A registry token is bound to exactly the host it is registered under.
+
+##### Resolution order
+
+For a given call, the resolved base URL is the `argocdBaseUrl` argument if supplied, otherwise the session default. The token is then chosen by:
+
+1. **Call targets the default base URL** → use the **default token**. If no default token was supplied (a tokenless session), fall back to the **registry token** for that base URL, if one exists.
+2. **Call targets any other base URL** → use the **registry token** for that base URL only. The **default token is never used here** — it is not sent to a host other than the default one.
+3. If neither applies (no token can be resolved for the requested base URL), the call returns a "Missing required ArgoCD API token" error and **no request is made** to that host.
 
 > **Why the default token is bound to the default base URL.** The `argocdBaseUrl` argument comes from the tool call, so a caller (or a prompt-injected model) could point it at an arbitrary host. If the default token were paired with any supplied base URL, that token would be sent — as an `Authorization: Bearer` header — to the attacker's host. Restricting the default token to the default base URL, and requiring an explicit registry entry for every other host, prevents this token exfiltration. To target additional instances you must register their tokens (and thus their hostnames) up front.
 
@@ -221,7 +236,7 @@ For example, a `tools/call` request overriding only the base URL:
 }
 ```
 
-> **Overriding the base URL to a different instance requires a registry entry.** The session token (`x-argocd-api-token` / `ARGOCD_API_TOKEN`) is bound to the default base URL only and is never sent to a different host. Overriding `argocdBaseUrl` to point at the **default** instance (same host, formatting aside) reuses the session token; pointing it at any **other** instance requires that instance to be in the [token registry](#token-registry--per-base-url-tokens-multi-instance), otherwise the call fails with "Missing required ArgoCD API token" and no request is sent. This is intentional — see [why the default token is bound to the default base URL](#token-registry--per-base-url-tokens-multi-instance) above.
+> **Overriding the base URL to a different instance requires a registry token.** The default token (`x-argocd-api-token` / `ARGOCD_API_TOKEN`) is bound to the default base URL only and is never sent to a different host. Overriding `argocdBaseUrl` to point at the **default** instance (same host, formatting aside) reuses the default token; pointing it at any **other** instance requires a [registry token](#two-kinds-of-token) for that instance, otherwise the call fails with "Missing required ArgoCD API token" and no request is sent. This is intentional — see [why the default token is bound to the default base URL](#token-registry--per-base-url-tokens-multi-instance) above.
 
 ### Read Only Mode
 
