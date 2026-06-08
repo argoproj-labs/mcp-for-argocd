@@ -240,7 +240,8 @@ export class Server extends McpServer {
         'create_application creates a new ArgoCD application in the specified namespace. The application.metadata.namespace field determines where the Application resource will be created (e.g., "argocd", "argocd-apps", or any custom namespace).',
         { application: ApplicationSchema },
         async ({ application }) =>
-          await this.argocdClient.createApplication(application as V1alpha1Application)
+          await this.argocdClient.createApplication(application as V1alpha1Application),
+        false
       );
       this.addJsonOutputTool(
         'update_application',
@@ -250,7 +251,8 @@ export class Server extends McpServer {
           await this.argocdClient.updateApplication(
             applicationName,
             application as V1alpha1Application
-          )
+          ),
+        false
       );
       this.addJsonOutputTool(
         'delete_application',
@@ -279,7 +281,8 @@ export class Server extends McpServer {
             applicationName,
             Object.keys(options).length > 0 ? options : undefined
           );
-        }
+        },
+        false
       );
       this.addJsonOutputTool(
         'sync_application',
@@ -320,7 +323,8 @@ export class Server extends McpServer {
             applicationName,
             Object.keys(options).length > 0 ? options : undefined
           );
-        }
+        },
+        false
       );
       this.addJsonOutputTool(
         'run_resource_action',
@@ -337,7 +341,8 @@ export class Server extends McpServer {
             applicationNamespace,
             resourceRef as V1alpha1ResourceResult,
             action
-          )
+          ),
+        false
       );
     }
   }
@@ -346,9 +351,10 @@ export class Server extends McpServer {
     name: string,
     description: string,
     paramsSchema: Args,
-    cb: (...cbArgs: Parameters<ToolCallback<Args>>) => T
+    cb: (...cbArgs: Parameters<ToolCallback<Args>>) => T,
+    readOnlyHint = true
   ) {
-    this.tool(name, description, paramsSchema as ZodRawShape, async (...args) => {
+    this.tool(name, description, paramsSchema as ZodRawShape, { readOnlyHint }, async (...args) => {
       try {
         const result = await cb.apply(this, args as Parameters<ToolCallback<Args>>);
         return {
