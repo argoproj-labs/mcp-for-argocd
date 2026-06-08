@@ -241,7 +241,7 @@ export class Server extends McpServer {
         { application: ApplicationSchema },
         async ({ application }) =>
           await this.argocdClient.createApplication(application as V1alpha1Application),
-        false
+        { readOnlyHint: false, destructiveHint: false }
       );
       this.addJsonOutputTool(
         'update_application',
@@ -252,7 +252,7 @@ export class Server extends McpServer {
             applicationName,
             application as V1alpha1Application
           ),
-        false
+        { readOnlyHint: false, destructiveHint: true }
       );
       this.addJsonOutputTool(
         'delete_application',
@@ -282,7 +282,7 @@ export class Server extends McpServer {
             Object.keys(options).length > 0 ? options : undefined
           );
         },
-        false
+        { readOnlyHint: false, destructiveHint: true }
       );
       this.addJsonOutputTool(
         'sync_application',
@@ -324,7 +324,7 @@ export class Server extends McpServer {
             Object.keys(options).length > 0 ? options : undefined
           );
         },
-        false
+        { readOnlyHint: false, destructiveHint: true }
       );
       this.addJsonOutputTool(
         'run_resource_action',
@@ -342,7 +342,7 @@ export class Server extends McpServer {
             resourceRef as V1alpha1ResourceResult,
             action
           ),
-        false
+        { readOnlyHint: false, destructiveHint: true }
       );
     }
   }
@@ -352,9 +352,9 @@ export class Server extends McpServer {
     description: string,
     paramsSchema: Args,
     cb: (...cbArgs: Parameters<ToolCallback<Args>>) => T,
-    readOnlyHint = true
+    annotations: { readOnlyHint?: boolean; destructiveHint?: boolean } = { readOnlyHint: true }
   ) {
-    this.tool(name, description, paramsSchema as ZodRawShape, { readOnlyHint }, async (...args) => {
+    this.tool(name, description, paramsSchema as ZodRawShape, annotations, async (...args) => {
       try {
         const result = await cb.apply(this, args as Parameters<ToolCallback<Args>>);
         return {
