@@ -40,6 +40,7 @@
     "dev-sse": "tsx watch src/index.ts sse",
     "lint": "eslint src/**/*.ts --no-warn-ignored",
     "lint:fix": "eslint src/**/*.ts --fix",
+    "test": "pnpm run build && node --test tests/cli-metadata.test.mjs",
     "build": "tsup",
     "build:watch": "tsup --watch",
     "generate-types": "dtsgen -c dtsgen.json -o src/types/argocd.d.ts swagger.json"

@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import {
@@ -6,8 +8,26 @@ import {
   connectSSETransport
 } from '../server/transport.js';
 
+const readPackageVersion = (): string => {
+  const entrypoint = process.argv[1] ? fs.realpathSync(process.argv[1]) : process.cwd();
+  let dir = path.dirname(path.resolve(entrypoint));
+  for (let i = 0; i < 5; i++) {
+    const packagePath = path.join(dir, 'package.json');
+    if (fs.existsSync(packagePath)) {
+      const packageJSON = JSON.parse(fs.readFileSync(packagePath, 'utf8')) as { version?: unknown };
+      if (typeof packageJSON.version === 'string') return packageJSON.version;
+    }
+
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  return 'unknown';
+};
+
 export const cmd = () => {
-  const exe = yargs(hideBin(process.argv));
+  const exe = yargs(hideBin(process.argv)).scriptName('argocd-mcp').version(readPackageVersion());
 
   exe.command(
     'stdio',
