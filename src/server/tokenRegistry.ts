@@ -54,8 +54,9 @@ export class TokenRegistry {
 
   // Normalize a base URL for stable lookups: lowercase the scheme+host and drop
   // any trailing slashes. Falls back to a trimmed, de-slashed string when the
-  // value is not a parseable URL.
-  private static normalize(baseUrl: string): string {
+  // value is not a parseable URL. Public so callers can compare base URLs
+  // against the registry using the exact same normalization the lookup uses.
+  public static normalize(baseUrl: string): string {
     const trimmed = baseUrl.trim();
     try {
       const url = new URL(trimmed);

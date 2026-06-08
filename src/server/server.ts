@@ -401,9 +401,17 @@ export class Server extends McpServer {
       );
     }
 
-    // Precedence: an explicitly supplied request/session token wins; otherwise
-    // fall back to a token configured for this base URL in the registry.
-    const apiToken = this.defaultApiToken || this.tokenRegistry.getToken(baseUrl);
+    // Resolve the token for this base URL. The default (session) token is bound
+    // to the default base URL ONLY: it must never be paired with a caller-
+    // supplied base URL, or an attacker (or prompt-injected model) could set
+    // argocdBaseUrl to an arbitrary host and have the server send the default
+    // token there (token exfiltration). For any overridden base URL, the token
+    // must come from the registry — i.e. the operator explicitly registered it.
+    const isDefaultBaseUrl =
+      TokenRegistry.normalize(baseUrl) === TokenRegistry.normalize(this.defaultBaseUrl);
+    const apiToken = isDefaultBaseUrl
+      ? this.defaultApiToken || this.tokenRegistry.getToken(baseUrl)
+      : this.tokenRegistry.getToken(baseUrl);
 
     if (!apiToken) {
       throw new Error(
