@@ -1,6 +1,9 @@
 FROM node:20-slim AS base
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
+# Run pnpm non-interactively: without a TTY, pnpm 10 otherwise aborts when it
+# needs to purge node_modules (ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY).
+ENV CI=true
 RUN corepack enable
 COPY . /app
 WORKDIR /app
