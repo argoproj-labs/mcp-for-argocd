@@ -2,6 +2,7 @@
   "name": "argocd-mcp",
   "version": "0.0.0",
   "description": "Argo CD MCP Server",
+  "packageManager": "pnpm@10.34.1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/argoproj-labs/mcp-for-argocd.git"
@@ -42,6 +43,7 @@
     "lint:fix": "eslint src/**/*.ts --fix",
     "build": "tsup",
     "build:watch": "tsup --watch",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "generate-types": "dtsgen -c dtsgen.json -o src/types/argocd.d.ts swagger.json"
   },
   "author": "Argo Proj Contributors.",

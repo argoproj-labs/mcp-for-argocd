@@ -75,6 +75,9 @@ web_modules/
 # Yarn Integrity file
 .yarn-integrity
 
+# local ArgoCD token registry (secret tokens — never commit)
+token-registry.json
+
 # dotenv environment variable files
 .env
 .env.development.local

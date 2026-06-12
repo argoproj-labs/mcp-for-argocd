@@ -18,12 +18,12 @@ jobs:
         with:
           node-version: 'lts/*'
       - uses: pnpm/action-setup@v4
-        with:
-          version: latest
       - name: Install dependencies
         run: pnpm install
       - name: Lint
         run:
           pnpm run lint
+      - name: Test
+        run: pnpm test
       - name: Create npm package
         run: pnpm pack

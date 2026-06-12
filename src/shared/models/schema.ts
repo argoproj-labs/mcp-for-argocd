@@ -33,30 +33,32 @@ export const ApplicationSchema = z.object({
     }),
     syncPolicy: z.object({
       syncOptions: z.array(z.string()),
-      automated: z.object({
-        prune: z.boolean(),
-        selfHeal: z.boolean()
-      }).optional(),
-      retry: z
+      automated: z
         .object({
-          limit: z.number(),
-          backoff: z.object({
-            duration: z.string(),
-            maxDuration: z.string(),
-            factor: z.number()
-          })
+          prune: z.boolean(),
+          selfHeal: z.boolean()
         })
+        .optional(),
+      retry: z.object({
+        limit: z.number(),
+        backoff: z.object({
+          duration: z.string(),
+          maxDuration: z.string(),
+          factor: z.number()
+        })
+      })
     }),
-    destination: z.object({
-      server: z.string().optional(),
-      namespace: z.string().optional(),
-      name: z.string().optional()
-    })
+    destination: z
+      .object({
+        server: z.string().optional(),
+        namespace: z.string().optional(),
+        name: z.string().optional()
+      })
       .refine(
         (data: { server?: string; name?: string }) =>
           (!data.server && !!data.name) || (!!data.server && !data.name),
         {
-          message: "Only one of server or name must be specified in destination"
+          message: 'Only one of server or name must be specified in destination'
         }
       )
       .describe(

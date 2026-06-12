@@ -6,11 +6,18 @@ import { createServer } from './server.js';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { tokenRegistryFromEnv } from './tokenRegistry.js';
+
+// Load the base-URL -> token registry once at startup from the JSON file at
+// ARGOCD_TOKEN_REGISTRY_PATH. Shared across all connections; read-only after
+// construction.
+const tokenRegistry = tokenRegistryFromEnv();
 
 export const connectStdioTransport = () => {
   const server = createServer({
     argocdBaseUrl: process.env.ARGOCD_BASE_URL || '',
-    argocdApiToken: process.env.ARGOCD_API_TOKEN || ''
+    argocdApiToken: process.env.ARGOCD_API_TOKEN || '',
+    tokenRegistry
   });
 
   logger.info('Connecting to stdio transport');
@@ -24,7 +31,8 @@ export const connectSSETransport = (port: number) => {
   app.get('/sse', async (req, res) => {
     const server = createServer({
       argocdBaseUrl: (req.headers['x-argocd-base-url'] as string) || '',
-      argocdApiToken: (req.headers['x-argocd-api-token'] as string) || ''
+      argocdApiToken: (req.headers['x-argocd-api-token'] as string) || '',
+      tokenRegistry
     });
 
     const transport = new SSEServerTransport('/messages', res);
@@ -49,6 +57,19 @@ export const connectSSETransport = (port: number) => {
   app.listen(port);
 };
 
+// Resolve the session-level ArgoCD credentials from headers or env.
+//
+// The API token is only ever accepted here (x-argocd-api-token header or
+// ARGOCD_API_TOKEN env var) — never as a tool-call argument — so the secret
+// stays in the transport layer and out of prompts/model context.
+//
+// The token is normally MANDATORY and the connection is rejected when it is
+// missing. The exception is when a token registry (ARGOCD_TOKEN_REGISTRY_PATH)
+// is configured: the per-call base URL can then resolve its token from the
+// registry, so a tokenless connection is allowed.
+//
+// The base URL is optional at this level: when it is absent, callers may supply
+// it per call via the argocdBaseUrl tool argument.
 const resolveCredentials = (
   req: express.Request,
   res: express.Response
@@ -57,8 +78,13 @@ const resolveCredentials = (
     (req.headers['x-argocd-base-url'] as string) || process.env.ARGOCD_BASE_URL || '';
   const argocdApiToken =
     (req.headers['x-argocd-api-token'] as string) || process.env.ARGOCD_API_TOKEN || '';
-  if (!argocdBaseUrl || !argocdApiToken) {
-    res.status(400).send('x-argocd-base-url and x-argocd-api-token must be provided in headers.');
+  if (!argocdApiToken && tokenRegistry.getSize() === 0) {
+    res
+      .status(400)
+      .send(
+        'x-argocd-api-token must be provided in the request header (or the ARGOCD_API_TOKEN env var), ' +
+          'or a token registry must be configured via ARGOCD_TOKEN_REGISTRY_PATH.'
+      );
     return null;
   }
   return { argocdBaseUrl, argocdApiToken };
@@ -101,7 +127,7 @@ export const connectHttpTransport = (port: number, stateless = false) => {
         };
       }
 
-      const server = createServer(credentials);
+      const server = createServer({ ...credentials, tokenRegistry });
       await server.connect(transport);
     } else {
       const errorMsg = sessionIdFromHeader
