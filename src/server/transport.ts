@@ -6,18 +6,21 @@ import { createServer } from './server.js';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { extraHeadersFromEnv } from '../argocd/extraHeaders.js';
 import { tokenRegistryFromEnv } from './tokenRegistry.js';
 
 // Load the base-URL -> token registry once at startup from the JSON file at
 // ARGOCD_TOKEN_REGISTRY_PATH. Shared across all connections; read-only after
 // construction.
 const tokenRegistry = tokenRegistryFromEnv();
+const extraHeaders = extraHeadersFromEnv();
 
 export const connectStdioTransport = () => {
   const server = createServer({
     argocdBaseUrl: process.env.ARGOCD_BASE_URL || '',
     argocdApiToken: process.env.ARGOCD_API_TOKEN || '',
-    tokenRegistry
+    tokenRegistry,
+    extraHeaders
   });
 
   logger.info('Connecting to stdio transport');
@@ -32,7 +35,8 @@ export const connectSSETransport = (port: number) => {
     const server = createServer({
       argocdBaseUrl: (req.headers['x-argocd-base-url'] as string) || '',
       argocdApiToken: (req.headers['x-argocd-api-token'] as string) || '',
-      tokenRegistry
+      tokenRegistry,
+      extraHeaders
     });
 
     const transport = new SSEServerTransport('/messages', res);
@@ -127,7 +131,7 @@ export const connectHttpTransport = (port: number, stateless = false) => {
         };
       }
 
-      const server = createServer({ ...credentials, tokenRegistry });
+      const server = createServer({ ...credentials, tokenRegistry, extraHeaders });
       await server.connect(transport);
     } else {
       const errorMsg = sessionIdFromHeader

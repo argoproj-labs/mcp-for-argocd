@@ -17,6 +17,9 @@ type ServerInfo = {
   // Optional registry mapping additional ArgoCD base URLs to their tokens. When
   // omitted, it is loaded from the ARGOCD_TOKEN_REGISTRY_PATH env var.
   tokenRegistry?: TokenRegistry;
+  // Optional extra HTTP headers for every Argo CD API request (from
+  // ARGOCD_EXTRA_HEADERS). Authorization and Content-Type cannot be overridden.
+  extraHeaders?: Record<string, string>;
 };
 
 // Per-call argument that any tool may accept to target a specific ArgoCD
@@ -45,6 +48,7 @@ export class Server extends McpServer {
   private defaultApiToken: string;
   private tokenRegistry: TokenRegistry;
   private argocdClient: ArgoCDClient;
+  private extraHeaders: Record<string, string>;
   // Cache per-credential clients to avoid rebuilding the HttpClient on every
   // call. Keyed by baseUrl + token, since the same base URL may resolve to
   // different tokens (request token vs. registry token vs. default).
@@ -58,7 +62,12 @@ export class Server extends McpServer {
     this.defaultBaseUrl = serverInfo.argocdBaseUrl;
     this.defaultApiToken = serverInfo.argocdApiToken;
     this.tokenRegistry = serverInfo.tokenRegistry ?? tokenRegistryFromEnv();
-    this.argocdClient = new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
+    this.extraHeaders = serverInfo.extraHeaders ?? {};
+    this.argocdClient = new ArgoCDClient(
+      serverInfo.argocdBaseUrl,
+      serverInfo.argocdApiToken,
+      this.extraHeaders
+    );
 
     const isReadOnly =
       String(process.env.MCP_READ_ONLY ?? '')
@@ -431,7 +440,7 @@ export class Server extends McpServer {
     const cacheKey = `${baseUrl} ${apiToken}`;
     let client = this.clientCache.get(cacheKey);
     if (!client) {
-      client = new ArgoCDClient(baseUrl, apiToken);
+      client = new ArgoCDClient(baseUrl, apiToken, this.extraHeaders);
       this.clientCache.set(cacheKey, client);
     }
     return client;
