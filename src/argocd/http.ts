@@ -11,10 +11,11 @@ export class HttpClient {
   public readonly apiToken: string;
   public readonly headers: Record<string, string>;
 
-  constructor(baseUrl: string, apiToken: string) {
+  constructor(baseUrl: string, apiToken: string, extraHeaders: Record<string, string> = {}) {
     this.baseUrl = baseUrl;
     this.apiToken = apiToken;
     this.headers = {
+      ...extraHeaders,
       Authorization: `Bearer ${this.apiToken}`,
       'Content-Type': 'application/json'
     };
