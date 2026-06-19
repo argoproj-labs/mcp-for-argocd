@@ -1,34 +1,47 @@
-import { readFileSync } from 'node:fs';
-import { logger } from '../logging/logging.js';
-
-// A read-only registry that maps an ArgoCD base URL to the API token that
-// should be used for it. It lets a single server target multiple ArgoCD
-// instances — each with its own token — without the token ever being passed in
-// a tool-call payload: the caller supplies only the (non-secret) base URL and
+// A read-only in-memory registry that maps an ArgoCD base URL to the API token
+// that should be used for it, and an optional profile name to that base URL. It
+// lets a single server target multiple ArgoCD instances — each with its own
+// token — without the token ever being passed in a tool-call payload: the
+// caller selects an instance by its (non-secret) profile name or base URL and
 // the server pairs it with the configured token.
 //
-// Configuration source: a JSON file whose path is given by the
-// ARGOCD_TOKEN_REGISTRY_PATH environment variable. The tokens are secrets, so
-// they are read from a file (e.g. a mounted Kubernetes secret) rather than an
-// env var, keeping them out of the process environment, crash dumps, and child
-// process inheritance. The file contains a JSON array of { baseUrl, token }
-// entries, e.g.
-//
-//   [
-//     {"baseUrl":"https://argo-a.example.com","token":"<token-a>"},
-//     {"baseUrl":"https://argo-b.example.com","token":"<token-b>"}
-//   ]
+// The registry is populated from the user's Argo CD CLI config file (see
+// argocd/localConfig.ts), so the credentials obtained via `argocd login`
+// (including SSO/OIDC and LDAP tokens) are reused directly. Tokens stay in this
+// in-memory store and are never exposed by the profile tools or tool-call
+// payloads.
 //
 // Base URLs are normalized (lowercased host, trailing slashes stripped) so
 // trivial formatting differences between the configured value and the requested
 // value don't cause a lookup miss.
+//
+// An entry may carry a non-secret `name`, which turns it into a selectable
+// "profile" (a friendly alias for the base URL — see Profile below), and an
+// optional `default: true` marking the profile that is active when a session
+// starts. Entries without a name still route by base URL; they just don't
+// appear in the profile list.
 export type TokenRegistryEntry = {
   baseUrl: string;
   token: string;
+  name?: string;
+  default?: boolean;
+};
+
+// The non-secret projection of a registry entry. A profile is a friendly,
+// named alias for a base URL that callers can select without ever seeing — or
+// needing to know — the token. The token is deliberately absent here so it can
+// never leak through a profile-listing tool's output.
+export type Profile = {
+  name: string;
+  baseUrl: string;
 };
 
 export class TokenRegistry {
   private tokensByBaseUrl = new Map<string, string>();
+  // Profiles keyed by their normalized (lowercased, trimmed) name. The stored
+  // Profile keeps the original-cased name and base URL for display.
+  private profilesByName = new Map<string, Profile>();
+  private defaultProfileName?: string;
 
   constructor(entries: TokenRegistryEntry[] = []) {
     for (const entry of entries) {
@@ -38,6 +51,28 @@ export class TokenRegistry {
         throw new Error('ArgoCD token registry entry is missing baseUrl or token');
       }
       this.tokensByBaseUrl.set(TokenRegistry.normalize(entry.baseUrl), entry.token);
+
+      const name = entry.name?.trim();
+      if (!name) {
+        // Unnamed entry: usable for base-URL routing, but not a selectable
+        // profile. Skip the profile bookkeeping (including any `default` flag,
+        // which is meaningless without a name to select).
+        continue;
+      }
+      const key = TokenRegistry.normalizeName(name);
+      if (this.profilesByName.has(key)) {
+        // Fail closed: duplicate names make selection ambiguous. Don't leak the
+        // token in the error.
+        throw new Error(`ArgoCD token registry has duplicate profile name "${name}"`);
+      }
+      this.profilesByName.set(key, { name, baseUrl: entry.baseUrl });
+      if (entry.default) {
+        if (this.defaultProfileName) {
+          // Fail closed: more than one default is ambiguous.
+          throw new Error('ArgoCD token registry has more than one default profile');
+        }
+        this.defaultProfileName = name;
+      }
     }
   }
 
@@ -50,6 +85,25 @@ export class TokenRegistry {
 
   public getSize(): number {
     return this.tokensByBaseUrl.size;
+  }
+
+  // Returns the profile with the given name (case-insensitive), or undefined
+  // when no such profile is registered.
+  public getProfile(name: string): Profile | undefined {
+    if (!name) return undefined;
+    return this.profilesByName.get(TokenRegistry.normalizeName(name));
+  }
+
+  // Returns all configured profiles as non-secret { name, baseUrl } objects.
+  // Never includes tokens.
+  public listProfiles(): Profile[] {
+    return [...this.profilesByName.values()].map((p) => ({ name: p.name, baseUrl: p.baseUrl }));
+  }
+
+  // Returns the name of the profile marked `default: true`, or undefined when
+  // none is.
+  public getDefaultProfileName(): string | undefined {
+    return this.defaultProfileName;
   }
 
   // Normalize a base URL for stable lookups: lowercase the scheme+host and drop
@@ -67,52 +121,11 @@ export class TokenRegistry {
       return trimmed.replace(/\/+$/, '');
     }
   }
+
+  // Normalize a profile name for stable, case-insensitive lookups. Mirrors the
+  // base-URL normalization spirit so "Staging" and "staging" select the same
+  // profile.
+  public static normalizeName(name: string): string {
+    return name.trim().toLowerCase();
+  }
 }
-
-// Parse the raw JSON contents of a token registry file into a TokenRegistry.
-// Throws when the contents are not valid JSON or not a JSON array: an operator
-// who configured a registry file expects token routing, so a malformed file is
-// a misconfiguration we surface loudly rather than silently degrade.
-export const parseTokenRegistry = (raw: string): TokenRegistry => {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(
-      `ArgoCD token registry file is not valid JSON: ${error instanceof Error ? error.message : String(error)}`
-    );
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error('ArgoCD token registry file must contain a JSON array');
-  }
-  return new TokenRegistry(parsed as TokenRegistryEntry[]);
-};
-
-// Build a TokenRegistry from the JSON file at ARGOCD_TOKEN_REGISTRY_PATH.
-// Returns an empty registry when the variable is unset (the server then runs on
-// its single default credential). When the variable IS set, this fails closed:
-// if the file cannot be read or is malformed it throws, so the process crashes
-// at startup rather than silently falling back to the default credential — which
-// could route calls to an instance with the wrong token.
-export const tokenRegistryFromEnv = (
-  registryPath: string | undefined = process.env.ARGOCD_TOKEN_REGISTRY_PATH
-): TokenRegistry => {
-  if (!registryPath || !registryPath.trim()) {
-    return new TokenRegistry();
-  }
-  let raw: string;
-  try {
-    raw = readFileSync(registryPath.trim(), 'utf8');
-  } catch (error) {
-    throw new Error(
-      `Failed to read ArgoCD token registry file at "${registryPath}": ${error instanceof Error ? error.message : String(error)}`
-    );
-  }
-  const registry = parseTokenRegistry(raw);
-  logger.info(
-    `Loaded ArgoCD token registry from "${registryPath}" with ${registry.getSize()} entr${
-      registry.getSize() === 1 ? 'y' : 'ies'
-    }`
-  );
-  return registry;
-};

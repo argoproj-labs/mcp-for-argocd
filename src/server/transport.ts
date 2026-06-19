@@ -7,23 +7,26 @@ import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import { tokenRegistryFromEnv } from './tokenRegistry.js';
+import { argoCdRegistrySource, type ProfileRegistrySource } from '../argocd/localConfig.js';
 import {
   applyListenerSecurity,
   resolveListenerSecurity,
   type ListenerSecurityOptions
 } from './security.js';
 
-// Load the base-URL -> token registry once at startup from the JSON file at
-// ARGOCD_TOKEN_REGISTRY_PATH. Shared across all connections; read-only after
-// construction.
-const tokenRegistry = tokenRegistryFromEnv();
+// Build the profile registry source once at startup from the Argo CD CLI config
+// file. The path is opt-in (the --config flag or the ARGOCD_CONFIG env var); the
+// default ~/.config/argocd/config location is never read implicitly. The initial
+// load is eager (fails closed); the profile tools re-read it on demand. Shared
+// across all connections.
+const buildRegistrySource = (configPath?: string) =>
+  argoCdRegistrySource(configPath ?? process.env.ARGOCD_CONFIG);
 
-export const connectStdioTransport = () => {
+export const connectStdioTransport = (configPath?: string) => {
   const server = createServer({
     argocdBaseUrl: process.env.ARGOCD_BASE_URL || '',
     argocdApiToken: process.env.ARGOCD_API_TOKEN || '',
-    tokenRegistry
+    registrySource: buildRegistrySource(configPath)
   });
 
   logger.info('Connecting to stdio transport');
@@ -64,9 +67,9 @@ const listen = (app: express.Express, bindAddress: string, port: number, label: 
 // stays in the transport layer and out of prompts/model context.
 //
 // The token is normally MANDATORY and the connection is rejected when it is
-// missing. The exception is when a token registry (ARGOCD_TOKEN_REGISTRY_PATH)
-// is configured: the per-call base URL can then resolve its token from the
-// registry, so a tokenless connection is allowed.
+// missing. The exception is when profiles (loaded from the Argo CD CLI config
+// via --config / ARGOCD_CONFIG) are configured: the per-call base URL can then
+// resolve its token from the registry, so a tokenless connection is allowed.
 //
 // The base URL is optional at this level: when it is absent, callers may supply
 // it per call via the argocdBaseUrl tool argument.
@@ -75,39 +78,41 @@ const listen = (app: express.Express, bindAddress: string, port: number, label: 
 // job (MCP_AUTH_TOKEN, see security.ts).
 const resolveCredentials = (
   req: express.Request,
-  res: express.Response
+  res: express.Response,
+  registrySource: ProfileRegistrySource
 ): { argocdBaseUrl: string; argocdApiToken: string } | null => {
   const argocdBaseUrl =
     (req.headers['x-argocd-base-url'] as string) || process.env.ARGOCD_BASE_URL || '';
   const argocdApiToken =
     (req.headers['x-argocd-api-token'] as string) || process.env.ARGOCD_API_TOKEN || '';
-  if (!argocdApiToken && tokenRegistry.getSize() === 0) {
+  if (!argocdApiToken && registrySource.get().getSize() === 0) {
     res
       .status(400)
       .send(
         'x-argocd-api-token must be provided in the request header (or the ARGOCD_API_TOKEN env var), ' +
-          'or a token registry must be configured via ARGOCD_TOKEN_REGISTRY_PATH.'
+          'or Argo CD profiles must be configured via --config / ARGOCD_CONFIG.'
       );
     return null;
   }
   return { argocdBaseUrl, argocdApiToken };
 };
 
-export const connectSSETransport = (options: TransportOptions) => {
+export const connectSSETransport = (options: TransportOptions & { configPath?: string }) => {
   const security = resolveListenerSecurity(options);
-  const { port } = options;
+  const { port, configPath } = options;
   const app = express();
   registerHealthz(app);
   applyListenerSecurity(app, security);
   const transports: { [sessionId: string]: SSEServerTransport } = {};
+  const registrySource = buildRegistrySource(configPath);
 
   app.get('/sse', async (req, res) => {
     // Same credential requirement as the http transport. Without it the handler
     // built an McpServer with empty credentials and held it until the socket
     // closed, one per connection.
-    const credentials = resolveCredentials(req, res);
+    const credentials = resolveCredentials(req, res, registrySource);
     if (!credentials) return;
-    const server = createServer({ ...credentials, tokenRegistry });
+    const server = createServer({ ...credentials, registrySource });
 
     const transport = new SSEServerTransport('/messages', res);
     transports[transport.sessionId] = transport;
@@ -130,15 +135,18 @@ export const connectSSETransport = (options: TransportOptions) => {
   return listen(app, security.bindAddress, port, 'SSE transport');
 };
 
-export const connectHttpTransport = (options: TransportOptions & { stateless?: boolean }) => {
+export const connectHttpTransport = (
+  options: TransportOptions & { stateless?: boolean; configPath?: string }
+) => {
   const security = resolveListenerSecurity(options);
-  const { port, stateless = false } = options;
+  const { port, stateless = false, configPath } = options;
   const app = express();
   registerHealthz(app);
   applyListenerSecurity(app, security);
   // After the security middleware, so malformed JSON returns 401/403 rather than
   // the body parser's 400, which would tell a caller it passed the credential check.
   app.use(express.json());
+  const registrySource = buildRegistrySource(configPath);
 
   const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
 
@@ -149,7 +157,7 @@ export const connectHttpTransport = (options: TransportOptions & { stateless?: b
     if (!stateless && sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
       transport = httpTransports[sessionIdFromHeader];
     } else if (stateless || (!sessionIdFromHeader && isInitializeRequest(req.body))) {
-      const credentials = resolveCredentials(req, res);
+      const credentials = resolveCredentials(req, res, registrySource);
       if (!credentials) return;
 
       transport = new StreamableHTTPServerTransport(
@@ -169,7 +177,7 @@ export const connectHttpTransport = (options: TransportOptions & { stateless?: b
         };
       }
 
-      const server = createServer({ ...credentials, tokenRegistry });
+      const server = createServer({ ...credentials, registrySource, stateless });
       await server.connect(transport);
     } else {
       const errorMsg = sessionIdFromHeader

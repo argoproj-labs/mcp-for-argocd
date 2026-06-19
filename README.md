@@ -37,6 +37,11 @@ const urlForGithub = `https://insiders.vscode.dev/redirect?url=${encodeURICompon
 
 The server provides the following ArgoCD management tools:
 
+### Profile Management
+- `list_profiles`: List the configured ArgoCD profiles (named instances) and the active/default one
+- `get_current_profile`: Get the profile active for the current session
+- `set_profile`: Select the active profile by name (see [Profiles](#profiles--multiple-instances-from-your-argo-cd-cli-config))
+
 ### Cluster Management
 - `list_clusters`: List all clusters registered with ArgoCD
 
@@ -163,7 +168,7 @@ The ArgoCD **API token is a secret and is only ever read from the transport laye
 
 This token is **outbound only**: it authenticates this server to ArgoCD and never authorizes an inbound caller. See [Network Exposure](#network-exposure) for who may reach the listener.
 
-This is the **default token**. It is **mandatory unless a [token registry](#token-registry--per-base-url-tokens-multi-instance) is configured**: on the HTTP transport, a connection that supplies no token (neither header nor env var) is rejected with `400 Bad Request`, but when a registry is configured a tokenless connection is allowed because each call resolves its own [registry token](#two-kinds-of-token). Keeping the token out of tool arguments ensures it never enters prompts, model context, or tool-call logs.
+This is the **default token**. It is **mandatory unless [profiles](#profiles--multiple-instances-from-your-argo-cd-cli-config) are configured**: on the HTTP transport, a connection that supplies no token (neither header nor env var) is rejected with `400 Bad Request`, but when profiles are configured a tokenless connection is allowed because each call resolves its own [profile token](#two-kinds-of-token). Keeping the token out of tool arguments ensures it never enters prompts, model context, or tool-call logs.
 
 #### Base URL — header / env var, or per-call argument
 
@@ -177,53 +182,57 @@ In addition, **every tool accepts an optional `argocdBaseUrl` argument**:
 - If a session default base URL exists, `argocdBaseUrl` is **optional** and overrides the default for that single call.
 - If no session default base URL is configured (header and env var both absent), `argocdBaseUrl` is **required**; a call without it returns an error.
 
-#### Token registry — per-base-URL tokens (multi-instance)
+#### Profiles — multiple instances from your Argo CD CLI config
 
-To target **multiple ArgoCD instances, each with its own token**, configure a token registry. Because the tokens are secrets, the registry is **read from a JSON file**, not an environment variable — point `ARGOCD_TOKEN_REGISTRY_PATH` at the file (e.g. a mounted Kubernetes secret). This keeps the tokens out of the process environment, crash dumps, and child-process inheritance.
+To target **multiple ArgoCD instances**, point the server at your existing **Argo CD CLI config file** — the one written by `argocd login` / `argocd context` (default location `~/.config/argocd/config`). Every context in it becomes a selectable **profile**, reusing the credentials you already have, including tokens obtained via **SSO/OIDC or LDAP** through `argocd login --sso`. No separate token file to maintain.
+
+Reading the config is **opt-in**: provide the path explicitly via the `--config` flag or the `ARGOCD_CONFIG` environment variable. The default `~/.config/argocd/config` location is **never read implicitly**.
 
 ```bash
-ARGOCD_TOKEN_REGISTRY_PATH=/app/argocd-mcp/token-registry.json
+# CLI flag
+argocd-mcp stdio --config ~/.config/argocd/config
+# or environment variable
+ARGOCD_CONFIG=~/.config/argocd/config argocd-mcp stdio
 ```
 
-The file contains a JSON array mapping a base URL to the token that should be used for it:
+Each context maps to a profile: its `server` becomes the base URL (`https://`, or `http://` when the matching `servers` entry is marked `plain-text`), and the linked user's `auth-token` becomes the token. The file's `current-context` becomes the **default/active** profile. Contexts with no `auth-token` (never logged in, or an expired session) are skipped with a warning.
 
-```json
-[
-  { "baseUrl": "https://argo-a.example.com", "token": "<token-a>" },
-  { "baseUrl": "https://argo-b.example.com", "token": "<token-b>" }
-]
-```
+Three tools manage the active profile **per session** — profile names are **non-secret**, but tokens are **never** exposed by any of them:
 
-> **Secure the file.** Restrict it to the server's user (e.g. `chmod 400`) and prefer a secret-management mechanism (Kubernetes secret volume, Vault agent, etc.) over a plaintext file on disk.
+- `list_profiles` — lists the configured profiles as `{ name, baseUrl }` (never tokens), plus which profile is currently `active` and which is the `default`.
+- `get_current_profile` — returns the profile active for this session (or the default base URL when none is active).
+- `set_profile` — selects the active profile by `name` (case-insensitive). Subsequent tool calls that don't pass an `argocdBaseUrl` override target that profile's instance.
 
-> **Local development.** The `make run` / `make dev` targets run without a registry by default; pass `ARGOCD_TOKEN_REGISTRY_PATH=/path/to/tokens.json` to use one. Do **not** place the file under `dist/` — `tsup` runs with `clean: true` and wipes that directory on every build. See [Running locally](#running-locally).
+> **Secure the file.** The config holds bearer tokens, so restrict it to the server's user (the `argocd` CLI writes it `0600` by default) and prefer a secret-management mechanism (Kubernetes secret volume, Vault agent, etc.) over a plaintext file when deploying.
 
-With a registry configured, a caller targets an instance by passing only the (non-secret) `argocdBaseUrl` argument; the server pairs it with the registered token. The token never appears in the tool-call payload.
+> **Stateless HTTP mode.** In [stateless mode](#stateless-mode) a fresh server is built per request, so `set_profile` does not persist across requests — it returns a warning to that effect. Rely on the `current-context` default profile instead.
+
+The per-call `argocdBaseUrl` argument still takes precedence over the active profile for a single call, and is still subject to the token boundary below.
 
 ##### Two kinds of token
 
 The server resolves calls using one of two distinct tokens. Keeping them straight is what makes the security model work:
 
-| | **Default token** | **Registry token** |
+| | **Default token** | **Profile token** |
 |---|---|---|
-| **Source** | `x-argocd-api-token` header / `ARGOCD_API_TOKEN` env var (the session credential) | A `token` entry in the `ARGOCD_TOKEN_REGISTRY_PATH` JSON file, keyed by `baseUrl` |
-| **Scope** | The **default base URL only** (`x-argocd-base-url` / `ARGOCD_BASE_URL`) | The **specific base URL** its entry is keyed to |
-| **Used for** | A call that targets the default base URL | A call that targets any base URL present in the registry (including the default, as a fallback) |
-| **Never used for** | Any base URL other than the default — it is **never** sent to a different host | Any base URL not registered |
+| **Source** | `x-argocd-api-token` header / `ARGOCD_API_TOKEN` env var (the session credential) | A context's `auth-token` in the Argo CD CLI config, keyed by its base URL |
+| **Scope** | The **default base URL only** (`x-argocd-base-url` / `ARGOCD_BASE_URL`) | The **specific base URL** of that profile |
+| **Used for** | A call that targets the default base URL | A call that targets any profile's base URL (including the default, as a fallback) |
+| **Never used for** | Any base URL other than the default — it is **never** sent to a different host | Any base URL not present in the config |
 
-The cardinal rule: **the default token is bound to the default base URL; every other host's token must come from the registry.** A registry token is bound to exactly the host it is registered under.
+The cardinal rule: **the default token is bound to the default base URL; every other host's token must come from a configured profile.** A profile token is bound to exactly the host it is configured for.
 
 ##### Resolution order
 
-For a given call, the resolved base URL is the `argocdBaseUrl` argument if supplied, otherwise the session default. The token is then chosen by:
+For a given call, the resolved base URL is the `argocdBaseUrl` argument if supplied, otherwise the active profile's base URL, otherwise the session default. The token is then chosen by:
 
-1. **Call targets the default base URL** → use the **default token**. If no default token was supplied (a tokenless session), fall back to the **registry token** for that base URL, if one exists.
-2. **Call targets any other base URL** → use the **registry token** for that base URL only. The **default token is never used here** — it is not sent to a host other than the default one.
+1. **Call targets the default base URL** → use the **default token**. If no default token was supplied (a tokenless session), fall back to the **profile token** for that base URL, if one exists.
+2. **Call targets any other base URL** → use the **profile token** for that base URL only. The **default token is never used here** — it is not sent to a host other than the default one.
 3. If neither applies (no token can be resolved for the requested base URL), the call returns a "Missing required ArgoCD API token" error and **no request is made** to that host.
 
-> **Why the default token is bound to the default base URL.** The `argocdBaseUrl` argument comes from the tool call, so a caller (or a prompt-injected model) could point it at an arbitrary host. If the default token were paired with any supplied base URL, that token would be sent — as an `Authorization: Bearer` header — to the attacker's host. Restricting the default token to the default base URL, and requiring an explicit registry entry for every other host, prevents this token exfiltration. To target additional instances you must register their tokens (and thus their hostnames) up front.
+> **Why the default token is bound to the default base URL.** The `argocdBaseUrl` argument comes from the tool call, so a caller (or a prompt-injected model) could point it at an arbitrary host. If the default token were paired with any supplied base URL, that token would be sent — as an `Authorization: Bearer` header — to the attacker's host. Restricting the default token to the default base URL, and requiring a configured profile for every other host, prevents this token exfiltration.
 
-Base URLs are normalized for lookup (lowercased host, trailing slashes ignored), so minor formatting differences still match. When a registry is configured, the HTTP transport no longer requires `x-argocd-api-token` at connection time — a tokenless connection is allowed because the per-call base URL resolves its own token. If `ARGOCD_TOKEN_REGISTRY_PATH` is set but the file is missing, unreadable, or malformed, the server **fails closed**: it throws at startup rather than silently falling back to its default credential, so a misconfigured registry can never cause calls to be routed with the wrong token.
+Base URLs are normalized for lookup (lowercased host, trailing slashes ignored), so minor formatting differences still match. When profiles are configured, the HTTP transport no longer requires `x-argocd-api-token` at connection time — a tokenless connection is allowed because the per-call base URL resolves its own token. If `--config` / `ARGOCD_CONFIG` is set but the file is missing, unreadable, or malformed, the server **fails closed**: it throws at startup rather than silently running with no profiles.
 
 For example, a `tools/call` request overriding only the base URL:
 
@@ -241,7 +250,7 @@ For example, a `tools/call` request overriding only the base URL:
 }
 ```
 
-> **Overriding the base URL to a different instance requires a registry token.** The default token (`x-argocd-api-token` / `ARGOCD_API_TOKEN`) is bound to the default base URL only and is never sent to a different host. Overriding `argocdBaseUrl` to point at the **default** instance (same host, formatting aside) reuses the default token; pointing it at any **other** instance requires a [registry token](#two-kinds-of-token) for that instance, otherwise the call fails with "Missing required ArgoCD API token" and no request is sent. This is intentional — see [why the default token is bound to the default base URL](#token-registry--per-base-url-tokens-multi-instance) above.
+> **Overriding the base URL to a different instance requires a configured profile.** The default token (`x-argocd-api-token` / `ARGOCD_API_TOKEN`) is bound to the default base URL only and is never sent to a different host. Overriding `argocdBaseUrl` to point at the **default** instance (same host, formatting aside) reuses the default token; pointing it at any **other** instance requires a profile for that instance in your Argo CD CLI config, otherwise the call fails with "Missing required ArgoCD API token" and no request is sent. This is intentional — see [why the default token is bound to the default base URL](#profiles--multiple-instances-from-your-argo-cd-cli-config) above. Selecting a profile by name with `set_profile` is the convenient alternative to passing raw base URLs.
 
 ### Network Exposure
 
@@ -369,7 +378,7 @@ make run    # build, then run the HTTP server (production-style)
 make dev    # run from source with hot reloading (tsx watch)
 ```
 
-By default neither target sets any credentials — the server starts with no default base URL or token, so callers must supply them per request (`x-argocd-base-url` / `x-argocd-api-token` headers, or the `argocdBaseUrl` tool argument once a registry is configured). Override the port the same way:
+By default neither target sets any credentials — the server starts with no default base URL or token, so callers must supply them per request (`x-argocd-base-url` / `x-argocd-api-token` headers, or the `argocdBaseUrl` tool argument once profiles are configured). Override the port the same way:
 
 ```bash
 make run PORT=4000
@@ -381,7 +390,7 @@ To configure credentials, export the relevant environment variable on the comman
 |---|---|
 | `ARGOCD_BASE_URL` | Default ArgoCD instance URL used when a call doesn't override it. |
 | `ARGOCD_API_TOKEN` | Static API token for the default base URL. |
-| `ARGOCD_TOKEN_REGISTRY_PATH` | Path to a JSON [token registry](#token-registry--per-base-url-tokens-multi-instance) mapping base URLs to tokens (for targeting multiple instances). |
+| `ARGOCD_CONFIG` | Path to an [Argo CD CLI config file](#profiles--multiple-instances-from-your-argo-cd-cli-config) whose contexts are loaded as profiles (for targeting multiple instances). Equivalent to the `--config` flag. |
 
 These are all outbound credentials. For who may reach the listener, see [Network Exposure](#network-exposure).
 
@@ -389,26 +398,26 @@ These are all outbound credentials. For who may reach the listener, see [Network
 # Single instance with a static base URL + token:
 make run ARGOCD_BASE_URL=https://argo.example.com ARGOCD_API_TOKEN=<token>
 
-# Multiple instances via a token registry:
-make run ARGOCD_TOKEN_REGISTRY_PATH=/path/to/tokens.json
+# Multiple instances via your Argo CD CLI config (each context becomes a profile):
+make run ARGOCD_CONFIG=~/.config/argocd/config
 
-# Both — a default instance plus extra instances resolved from the registry:
+# Both — a default base URL/token plus profiles resolved from the config:
 make dev ARGOCD_BASE_URL=https://argo.example.com ARGOCD_API_TOKEN=<token> \
-  ARGOCD_TOKEN_REGISTRY_PATH=/path/to/tokens.json
+  ARGOCD_CONFIG=~/.config/argocd/config
 ```
 
-See [Token resolution](#token-registry--per-base-url-tokens-multi-instance) for how the default token and registry interact. If `ARGOCD_TOKEN_REGISTRY_PATH` is set but the file is missing, unreadable, or malformed, the server fails closed at startup.
+See [Profiles](#profiles--multiple-instances-from-your-argo-cd-cli-config) for how the default token and profile tokens interact. If `ARGOCD_CONFIG` is set but the file is missing, unreadable, or malformed, the server fails closed at startup.
 
 > **Keep tokens out of your shell history.** Passing `ARGOCD_API_TOKEN=<token>` directly on the `make` command line records the secret in your shell history and exposes it in the process list. Prefer exporting it in the shell first so it never appears in the `make` invocation:
 > ```bash
 > export ARGOCD_API_TOKEN=<token>
 > make run ARGOCD_BASE_URL=https://argo.example.com
 > ```
-> A registry path (`ARGOCD_TOKEN_REGISTRY_PATH`) and base URL are not secrets, so they're fine to pass inline.
+> A config path (`ARGOCD_CONFIG`) and base URL are not secrets, so they're fine to pass inline.
 
 > Do not place the registry file under `dist/` — `tsup` builds with `clean: true` and wipes that directory on every build.
 
-The HTTP server listens on `POST /mcp` (`127.0.0.1:3000` by default, see [Network Exposure](#network-exposure) to widen it) with a `GET /healthz` liveness endpoint. To send a request, first `initialize` a session (capture the `mcp-session-id` response header), then call a tool, passing one of the registered base URLs as the `argocdBaseUrl` argument:
+The HTTP server listens on `POST /mcp` (`127.0.0.1:3000` by default, see [Network Exposure](#network-exposure) to widen it) with a `GET /healthz` liveness endpoint. To send a request, first `initialize` a session (capture the `mcp-session-id` response header), then call a tool, passing one of your configured base URLs as the `argocdBaseUrl` argument (or select a profile with `set_profile`):
 
 ```bash
 # 1. Initialize a session — note the mcp-session-id response header

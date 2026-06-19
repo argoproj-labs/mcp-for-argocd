@@ -1,18 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { TokenRegistry, parseTokenRegistry, tokenRegistryFromEnv } from './tokenRegistry.js';
-
-// Helper: write `contents` to a throwaway file and return its path. The file is
-// removed when `cleanup` is called, keeping each test self-contained.
-const withTempFile = (contents: string): { path: string; cleanup: () => void } => {
-  const dir = mkdtempSync(join(tmpdir(), 'token-registry-test-'));
-  const path = join(dir, 'registry.json');
-  writeFileSync(path, contents, 'utf8');
-  return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
-};
+import { TokenRegistry } from './tokenRegistry.js';
 
 // --- TokenRegistry construction & lookup ---------------------------------
 
@@ -72,63 +60,82 @@ test('constructor error does not leak the token value', () => {
   );
 });
 
-// --- parseTokenRegistry --------------------------------------------------
+// --- Profiles ------------------------------------------------------------
 
-test('parseTokenRegistry builds a registry from a valid JSON array', () => {
-  const registry = parseTokenRegistry(
-    JSON.stringify([
-      { baseUrl: 'https://argo-a.example.com', token: 'token-a' },
-      { baseUrl: 'https://argo-b.example.com', token: 'token-b' }
-    ])
-  );
-  assert.equal(registry.getSize(), 2);
-  assert.equal(registry.getToken('https://argo-b.example.com'), 'token-b');
+test('entries without a name contribute no profiles (backward compatible)', () => {
+  const registry = new TokenRegistry([
+    { baseUrl: 'https://argo-a.example.com', token: 'token-a' },
+    { baseUrl: 'https://argo-b.example.com', token: 'token-b' }
+  ]);
+  assert.deepEqual(registry.listProfiles(), []);
+  assert.equal(registry.getSize(), 2); // still routable by base URL
+  assert.equal(registry.getDefaultProfileName(), undefined);
 });
 
-test('parseTokenRegistry throws on invalid JSON', () => {
-  assert.throws(() => parseTokenRegistry('not json {'), /not valid JSON/);
+test('named entries become selectable profiles exposing name + baseUrl only', () => {
+  const registry = new TokenRegistry([
+    { name: 'prod', baseUrl: 'https://argo-a.example.com', token: 'token-a' },
+    { name: 'staging', baseUrl: 'https://argo-b.example.com', token: 'token-b' }
+  ]);
+  assert.deepEqual(registry.listProfiles(), [
+    { name: 'prod', baseUrl: 'https://argo-a.example.com' },
+    { name: 'staging', baseUrl: 'https://argo-b.example.com' }
+  ]);
 });
 
-test('parseTokenRegistry throws when the JSON is not an array', () => {
+test('listProfiles never exposes tokens', () => {
+  const registry = new TokenRegistry([
+    { name: 'prod', baseUrl: 'https://argo-a.example.com', token: 'super-secret-token' }
+  ]);
+  assert.ok(!JSON.stringify(registry.listProfiles()).includes('super-secret-token'));
+});
+
+test('getProfile resolves names case-insensitively', () => {
+  const registry = new TokenRegistry([
+    { name: 'Prod', baseUrl: 'https://argo-a.example.com', token: 'token-a' }
+  ]);
+  assert.deepEqual(registry.getProfile('prod'), {
+    name: 'Prod',
+    baseUrl: 'https://argo-a.example.com'
+  });
+  assert.deepEqual(registry.getProfile('PROD'), {
+    name: 'Prod',
+    baseUrl: 'https://argo-a.example.com'
+  });
+  assert.equal(registry.getProfile('missing'), undefined);
+});
+
+test('a single default: true entry sets the default profile name', () => {
+  const registry = new TokenRegistry([
+    { name: 'prod', baseUrl: 'https://argo-a.example.com', token: 'token-a' },
+    { name: 'staging', baseUrl: 'https://argo-b.example.com', token: 'token-b', default: true }
+  ]);
+  assert.equal(registry.getDefaultProfileName(), 'staging');
+});
+
+test('constructor throws (fail closed) on duplicate profile names without leaking the token', () => {
   assert.throws(
-    () => parseTokenRegistry(JSON.stringify({ baseUrl: 'x', token: 'y' })),
-    /must contain a JSON array/
+    () =>
+      new TokenRegistry([
+        { name: 'prod', baseUrl: 'https://argo-a.example.com', token: 'super-secret-token' },
+        { name: 'PROD', baseUrl: 'https://argo-b.example.com', token: 'token-b' }
+      ]),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /duplicate profile name/);
+      assert.ok(!error.message.includes('super-secret-token'));
+      return true;
+    }
   );
 });
 
-// --- tokenRegistryFromEnv ------------------------------------------------
-
-test('tokenRegistryFromEnv returns an empty registry when the path is unset', () => {
-  assert.equal(tokenRegistryFromEnv(undefined).getSize(), 0);
-  assert.equal(tokenRegistryFromEnv('').getSize(), 0);
-  assert.equal(tokenRegistryFromEnv('   ').getSize(), 0);
-});
-
-test('tokenRegistryFromEnv loads a registry from a valid file', () => {
-  const { path, cleanup } = withTempFile(
-    JSON.stringify([{ baseUrl: 'https://argo-a.example.com', token: 'token-a' }])
-  );
-  try {
-    const registry = tokenRegistryFromEnv(path);
-    assert.equal(registry.getSize(), 1);
-    assert.equal(registry.getToken('https://argo-a.example.com'), 'token-a');
-  } finally {
-    cleanup();
-  }
-});
-
-test('tokenRegistryFromEnv throws (fail closed) when the configured file is missing', () => {
+test('constructor throws (fail closed) when more than one profile is default', () => {
   assert.throws(
-    () => tokenRegistryFromEnv('/nonexistent/path/registry.json'),
-    /Failed to read ArgoCD token registry file/
+    () =>
+      new TokenRegistry([
+        { name: 'prod', baseUrl: 'https://argo-a.example.com', token: 'token-a', default: true },
+        { name: 'staging', baseUrl: 'https://argo-b.example.com', token: 'token-b', default: true }
+      ]),
+    /more than one default profile/
   );
-});
-
-test('tokenRegistryFromEnv throws (fail closed) when the configured file is malformed', () => {
-  const { path, cleanup } = withTempFile('not json {');
-  try {
-    assert.throws(() => tokenRegistryFromEnv(path), /not valid JSON/);
-  } finally {
-    cleanup();
-  }
 });
