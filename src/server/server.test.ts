@@ -80,6 +80,42 @@ test('overridden base URL with a registry entry uses the registry token, not the
   assert.notEqual(client.client.apiToken, DEFAULT_TOKEN);
 });
 
+test('overridden base URL registered for passthrough forwards the request token', async () => {
+  // A passthrough entry lets the caller's identity flow through to a second
+  // instance: resolveClient pairs the override URL with the request token
+  // (DEFAULT_TOKEN here) rather than failing or minting a per-instance token.
+  const registry = new TokenRegistry([{ baseUrl: OTHER_BASE_URL, passthrough: true }]);
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: registry
+  });
+
+  const client = (
+    server as unknown as {
+      resolveClient: (a: { argocdBaseUrl?: string }) => unknown;
+    }
+  ).resolveClient({ argocdBaseUrl: OTHER_BASE_URL }) as { client: { apiToken: string } };
+
+  assert.equal(client.client.apiToken, DEFAULT_TOKEN);
+});
+
+test('passthrough entry with no request token fails closed (no token to forward)', async () => {
+  // Passthrough only works when the caller actually presented a token. With an
+  // empty session token there is nothing to forward, so the call must fail
+  // rather than send a blank token to the instance.
+  const registry = new TokenRegistry([{ baseUrl: OTHER_BASE_URL, passthrough: true }]);
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: '',
+    tokenRegistry: registry
+  });
+
+  const result = await callTool(server, 'list_applications', { argocdBaseUrl: OTHER_BASE_URL });
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /Missing required ArgoCD API token/);
+});
+
 test('default base URL uses the default token', async () => {
   const server = createServer({
     argocdBaseUrl: DEFAULT_BASE_URL,
