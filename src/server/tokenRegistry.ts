@@ -13,9 +13,12 @@ import { logger } from '../logging/logging.js';
 //   • passthrough — forward the caller's per-request token (the JWT from the
 //                   x-argocd-api-token header) to that instance. This lets the
 //                   end user's own identity flow through for auditability, with
-//                   no per-instance token to mint. It only authenticates when
-//                   the same token is accepted by the instance — i.e. a shared
-//                   OIDC/SSO setup where one IdP fronts every instance.
+//                   no per-instance token to mint. The forwarded token must be
+//                   one the instance accepts: an OIDC/SSO token whose audience
+//                   matches that instance's OIDC client. Each instance validates
+//                   its own audience, so a token is scoped to a single instance
+//                   and the caller presents the right token per request. See the
+//                   passthrough security notes in the README before enabling it.
 //
 // Configuration source: a JSON file whose path is given by the
 // ARGOCD_TOKEN_REGISTRY_PATH environment variable. The tokens are secrets, so

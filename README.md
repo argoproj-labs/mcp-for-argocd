@@ -183,7 +183,7 @@ ARGOCD_TOKEN_REGISTRY_PATH=/app/argocd-mcp/token-registry.json
 The file contains a JSON array of entries, each keyed by base URL. An entry authenticates its instance one of two ways — set **exactly one** of `token` or `passthrough`:
 
 - `token` — a **static token** configured for that instance. The token stays on the server; the caller only references the URL.
-- `passthrough: true` — **forward the caller's per-request token** (the `x-argocd-api-token` JWT) to that instance, so the end user's own identity reaches ArgoCD for auditability, with no per-instance token to mint. This only authenticates when the same token is accepted by the instance — i.e. a **shared OIDC/SSO** setup where one identity provider fronts every instance (an ArgoCD-local token or PAT is per-instance and will not authenticate elsewhere).
+- `passthrough: true` — **forward the caller's per-request token** (the `x-argocd-api-token` JWT) to that instance, so the end user's own identity reaches ArgoCD for auditability, with no per-instance token to mint. The forwarded token must be one the target instance accepts — i.e. an **OIDC/SSO** token whose audience matches that instance's OIDC client. The caller is responsible for presenting the token scoped to the instance it is targeting (see [Security & deployment requirements](#security--deployment-requirements-for-passthrough) below). An ArgoCD-local token or PAT is bound to a single instance and will not authenticate elsewhere.
 
 ```json
 [
@@ -194,6 +194,18 @@ The file contains a JSON array of entries, each keyed by base URL. An entry auth
 ```
 
 > **Passthrough needs matching RBAC.** A forwarded identity only succeeds if that user has the required permissions on the target instance; otherwise the call returns a per-instance `403` from ArgoCD (not a routing error). An entry that sets neither `token` nor `passthrough` — or both — is rejected at startup (fail closed), so a secret that fails to mount and leaves `token` blank crashes rather than silently forwarding the JWT.
+
+###### Security & deployment requirements for passthrough
+
+Passthrough forwards a bearer token to another host, so it has two hard requirements. Read these before enabling it.
+
+1. **Every passthrough instance MUST enforce OIDC audience validation.** When several ArgoCD instances share one identity provider (e.g. the same Okta org / auth server), they share an **issuer and signing keys** — so any instance can cryptographically *verify the signature* of a token issued for any other instance. The **only** thing that stops a token from one instance being replayed against another is the audience (`aud` / `client_id`) check. The safe configuration is **one OIDC client (app) per ArgoCD instance**, each validating its own audience: a token scoped to instance A is then rejected by instance B, so a forwarded (or leaked) token cannot be reused elsewhere. **Do not relax this** — if an instance enables `skipAudienceCheckWhenTokenHasEmptyAudience`, lists another instance's client ID in `allowedAudiences`, or two instances share a client ID, the audience wall is gone and a token forwarded to one instance becomes replayable against the others. Audience validation is the load-bearing control here, not network reachability.
+
+2. **Use stateless mode for multi-instance passthrough.** Because each instance validates its own audience, **one token authenticates to exactly one instance** — there is no single token that works everywhere. The caller must therefore attach the audience-scoped token for whichever instance it is targeting, on each request. That only works when the token is read per request:
+   - **`http --stateless`** (recommended for passthrough): the `x-argocd-api-token` header is read fresh on every call, so a caller can target different instances — each with its own token — across calls.
+   - **Default session mode / SSE:** the token is bound once at connection time, so a single session is effectively pinned to one instance's audience. Multi-instance use within one session will fail audience validation on the other instances.
+
+> **Trust note.** Static-token entries keep each instance's credential scoped to that instance alone. Passthrough instead forwards the caller's token; with per-instance audiences (requirement 1) its scope stays limited to the target instance, which is why that requirement is mandatory rather than optional.
 
 > **Secure the file.** Restrict it to the server's user (e.g. `chmod 400`) and prefer a secret-management mechanism (Kubernetes secret volume, Vault agent, etc.) over a plaintext file on disk.
 
