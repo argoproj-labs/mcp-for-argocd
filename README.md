@@ -266,12 +266,21 @@ To run without session affinity requirements, start the server with the `--state
 node dist/index.js http --stateless
 ```
 
-Or with Docker:
+Or with Docker. The published image provides the server command through `CMD`
+(`node dist/index.js http`) on top of the Node base image's generic entrypoint, so any
+arguments you pass to `docker run` **replace** that command rather than appending to it.
+Pass the full command — including `node dist/index.js` — alongside the flags:
 
 ```bash
 docker run -e ARGOCD_BASE_URL=<argocd_url> -e ARGOCD_API_TOKEN=<argocd_token> \
-  argoprojlabs/mcp-for-argocd http --stateless
+  ghcr.io/argoproj-labs/mcp-for-argocd node dist/index.js http --stateless
 ```
+
+> **Why the full command?** The image has no app-specific `ENTRYPOINT`. Running
+> `docker run ... ghcr.io/argoproj-labs/mcp-for-argocd http --stateless` makes the base
+> image's launcher treat `http` as a script path and fails with
+> `Error: Cannot find module '/app/http'`. Including `node dist/index.js` appends the
+> `http --stateless` flags to the real command.
 
 In stateless mode:
 - No `Mcp-Session-Id` is returned or required — any replica can handle any request
