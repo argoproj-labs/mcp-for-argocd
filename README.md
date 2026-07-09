@@ -161,7 +161,7 @@ The ArgoCD **API token is a secret and is only ever read from the transport laye
 - **HTTP headers** (HTTP transport only): `x-argocd-api-token`.
 - **Environment variables**: `ARGOCD_API_TOKEN` (all transports).
 
-This is the **default token**. It is **mandatory unless a [token registry](#token-registry--per-base-url-tokens-multi-instance) is configured**: on the HTTP transport, a connection that supplies no token (neither header nor env var) is rejected with `400 Bad Request`, but when a registry is configured a tokenless connection is allowed because each call resolves its own [registry token](#two-kinds-of-token). Keeping the token out of tool arguments ensures it never enters prompts, model context, or tool-call logs.
+This is the **default token**. It is **mandatory unless a [token registry](#token-registry--per-base-url-tokens-multi-instance) is configured**: on the HTTP transport, a connection that supplies no token (neither header nor env var) is rejected with `400 Bad Request`, but when a registry is configured a tokenless connection is allowed because each call resolves its own [registry token](#kinds-of-token). Keeping the token out of tool arguments ensures it never enters prompts, model context, or tool-call logs.
 
 #### Base URL — header / env var, or per-call argument
 
@@ -183,41 +183,60 @@ To target **multiple ArgoCD instances, each with its own token**, configure a to
 ARGOCD_TOKEN_REGISTRY_PATH=/app/argocd-mcp/token-registry.json
 ```
 
-The file contains a JSON array mapping a base URL to the token that should be used for it:
+The file contains a JSON array of entries, each keyed by base URL. An entry authenticates its instance one of two ways — set **exactly one** of `token` or `passthrough`:
+
+- `token` — a **static token** configured for that instance. The token stays on the server; the caller only references the URL.
+- `passthrough: true` — **forward the caller's per-request token** (the `x-argocd-api-token` JWT) to that instance, so the end user's own identity reaches ArgoCD for auditability, with no per-instance token to mint. The forwarded token must be one the target instance accepts — i.e. an **OIDC/SSO** token whose audience matches that instance's OIDC client. The caller is responsible for presenting the token scoped to the instance it is targeting (see [Security & deployment requirements](#security--deployment-requirements-for-passthrough) below). An ArgoCD-local token or PAT is bound to a single instance and will not authenticate elsewhere.
 
 ```json
 [
-  { "baseUrl": "https://argo-a.example.com", "token": "<token-a>" },
-  { "baseUrl": "https://argo-b.example.com", "token": "<token-b>" }
+  { "baseUrl": "https://argo-a.example.com", "passthrough": true },
+  { "baseUrl": "https://argo-b.example.com", "passthrough": true },
+  { "baseUrl": "https://argo-legacy.example.com", "token": "<static-token>" }
 ]
 ```
+
+> **Passthrough needs matching RBAC.** A forwarded identity only succeeds if that user has the required permissions on the target instance; otherwise the call returns a per-instance `403` from ArgoCD (not a routing error). An entry that sets neither `token` nor `passthrough` — or both — is rejected at startup (fail closed), so a secret that fails to mount and leaves `token` blank crashes rather than silently forwarding the JWT.
+
+###### Security & deployment requirements for passthrough
+
+Passthrough forwards a bearer token to another host, so it has two hard requirements. Read these before enabling it.
+
+1. **Every passthrough instance MUST enforce OIDC audience validation.** When several ArgoCD instances share one identity provider (e.g. the same Okta org / auth server), they share an **issuer and signing keys** — so any instance can cryptographically *verify the signature* of a token issued for any other instance. The **only** thing that stops a token from one instance being replayed against another is the audience (`aud` / `client_id`) check. The safe configuration is **one OIDC client (app) per ArgoCD instance**, each validating its own audience: a token scoped to instance A is then rejected by instance B, so a forwarded (or leaked) token cannot be reused elsewhere. **Do not relax this** — if an instance enables `skipAudienceCheckWhenTokenHasEmptyAudience`, lists another instance's client ID in `allowedAudiences`, or two instances share a client ID, the audience wall is gone and a token forwarded to one instance becomes replayable against the others. Audience validation is the load-bearing control here, not network reachability.
+
+2. **Use stateless mode for multi-instance passthrough.** Because each instance validates its own audience, **one token authenticates to exactly one instance** — there is no single token that works everywhere. The caller must therefore attach the audience-scoped token for whichever instance it is targeting, on each request. That only works when the token is read per request:
+   - **`http --stateless`** (recommended for passthrough): the `x-argocd-api-token` header is read fresh on every call, so a caller can target different instances — each with its own token — across calls.
+   - **Default session mode / SSE:** the token is bound once at connection time, so a single session is effectively pinned to one instance's audience. Multi-instance use within one session will fail audience validation on the other instances.
+
+> **Trust note.** Static-token entries keep each instance's credential scoped to that instance alone. Passthrough instead forwards the caller's token; with per-instance audiences (requirement 1) its scope stays limited to the target instance, which is why that requirement is mandatory rather than optional.
 
 > **Secure the file.** Restrict it to the server's user (e.g. `chmod 400`) and prefer a secret-management mechanism (Kubernetes secret volume, Vault agent, etc.) over a plaintext file on disk.
 
 > **Local development.** The `make run` / `make dev` targets run without a registry by default; pass `ARGOCD_TOKEN_REGISTRY_PATH=/path/to/tokens.json` to use one. Do **not** place the file under `dist/` — `tsup` runs with `clean: true` and wipes that directory on every build. See [Running locally](#running-locally).
 
-With a registry configured, a caller targets an instance by passing only the (non-secret) `argocdBaseUrl` argument; the server pairs it with the registered token. The token never appears in the tool-call payload.
+With a registry configured, a caller targets an instance by passing only the (non-secret) `argocdBaseUrl` argument; the server pairs it with the registered token (or forwards the request token for a passthrough entry). No token ever appears in the tool-call payload.
 
-##### Two kinds of token
+##### Kinds of token
 
-The server resolves calls using one of two distinct tokens. Keeping them straight is what makes the security model work:
+The server resolves calls using one of these tokens. Keeping them straight is what makes the security model work:
 
-| | **Default token** | **Registry token** |
-|---|---|---|
-| **Source** | `x-argocd-api-token` header / `ARGOCD_API_TOKEN` env var (the session credential) | A `token` entry in the `ARGOCD_TOKEN_REGISTRY_PATH` JSON file, keyed by `baseUrl` |
-| **Scope** | The **default base URL only** (`x-argocd-base-url` / `ARGOCD_BASE_URL`) | The **specific base URL** its entry is keyed to |
-| **Used for** | A call that targets the default base URL | A call that targets any base URL present in the registry (including the default, as a fallback) |
-| **Never used for** | Any base URL other than the default — it is **never** sent to a different host | Any base URL not registered |
+| | **Default token** | **Registry static token** | **Passthrough** |
+|---|---|---|---|
+| **Source** | `x-argocd-api-token` header / `ARGOCD_API_TOKEN` env var (the session credential) | A `token` entry in the registry file, keyed by `baseUrl` | The request token, forwarded to a `passthrough: true` entry |
+| **Scope** | The **default base URL only** (`x-argocd-base-url` / `ARGOCD_BASE_URL`) | The **specific base URL** its entry is keyed to | The **specific base URL** its entry is keyed to |
+| **Used for** | A call that targets the default base URL | A call that targets that registered base URL | A call that targets that registered base URL |
+| **Never used for** | Any base URL other than the default — it is **never** sent to a different host | Any base URL not registered | Any base URL not registered as passthrough |
 
-The cardinal rule: **the default token is bound to the default base URL; every other host's token must come from the registry.** A registry token is bound to exactly the host it is registered under.
+The cardinal rule: **the request token is only ever sent to the default base URL or to a base URL explicitly registered for passthrough; every other host's token must come from a static registry entry.**
 
 ##### Resolution order
 
 For a given call, the resolved base URL is the `argocdBaseUrl` argument if supplied, otherwise the session default. The token is then chosen by:
 
-1. **Call targets the default base URL** → use the **default token**. If no default token was supplied (a tokenless session), fall back to the **registry token** for that base URL, if one exists.
-2. **Call targets any other base URL** → use the **registry token** for that base URL only. The **default token is never used here** — it is not sent to a host other than the default one.
-3. If neither applies (no token can be resolved for the requested base URL), the call returns a "Missing required ArgoCD API token" error and **no request is made** to that host.
+1. **Call targets the default base URL** → use the **default token**. If no default token was supplied (a tokenless session), fall back to the **registry static token** for that base URL, if one exists.
+2. **Call targets a base URL registered with a static token** → use that **static token** (the request token never overrides it).
+3. **Call targets a base URL registered for passthrough** → forward the **request token** to it.
+4. If none applies (no token can be resolved for the requested base URL), the call returns a "Missing required ArgoCD API token" error and **no request is made** to that host.
 
 > **Why the default token is bound to the default base URL.** The `argocdBaseUrl` argument comes from the tool call, so a caller (or a prompt-injected model) could point it at an arbitrary host. If the default token were paired with any supplied base URL, that token would be sent — as an `Authorization: Bearer` header — to the attacker's host. Restricting the default token to the default base URL, and requiring an explicit registry entry for every other host, prevents this token exfiltration. To target additional instances you must register their tokens (and thus their hostnames) up front.
 
@@ -239,7 +258,7 @@ For example, a `tools/call` request overriding only the base URL:
 }
 ```
 
-> **Overriding the base URL to a different instance requires a registry token.** The default token (`x-argocd-api-token` / `ARGOCD_API_TOKEN`) is bound to the default base URL only and is never sent to a different host. Overriding `argocdBaseUrl` to point at the **default** instance (same host, formatting aside) reuses the default token; pointing it at any **other** instance requires a [registry token](#two-kinds-of-token) for that instance, otherwise the call fails with "Missing required ArgoCD API token" and no request is sent. This is intentional — see [why the default token is bound to the default base URL](#token-registry--per-base-url-tokens-multi-instance) above.
+> **Overriding the base URL to a different instance requires a registry token.** The default token (`x-argocd-api-token` / `ARGOCD_API_TOKEN`) is bound to the default base URL only and is never sent to a different host. Overriding `argocdBaseUrl` to point at the **default** instance (same host, formatting aside) reuses the default token; pointing it at any **other** instance requires a [registry entry](#kinds-of-token) for that instance — either a static token or `passthrough: true` — otherwise the call fails with "Missing required ArgoCD API token" and no request is sent. This is intentional — see [why the default token is bound to the default base URL](#token-registry--per-base-url-tokens-multi-instance) above.
 
 ### Read Only Mode
 

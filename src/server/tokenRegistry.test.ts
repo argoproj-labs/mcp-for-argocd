@@ -47,29 +47,65 @@ test('an empty registry has size 0 and finds nothing', () => {
 
 // --- Fail-closed: constructor rejects malformed entries ------------------
 
-test('constructor throws when an entry is missing its token', () => {
+test('constructor throws when an entry is missing its base URL', () => {
+  assert.throws(() => new TokenRegistry([{ baseUrl: '', token: 'token-a' }]), /missing baseUrl/);
+});
+
+test('constructor throws when an entry has neither a token nor passthrough', () => {
+  assert.throws(
+    () => new TokenRegistry([{ baseUrl: 'https://argo-a.example.com' }]),
+    /must specify either a token or passthrough/
+  );
+  // An empty token is NOT treated as passthrough: it fails closed so a secret
+  // that fails to mount crashes at startup instead of forwarding the JWT.
   assert.throws(
     () => new TokenRegistry([{ baseUrl: 'https://argo-a.example.com', token: '' }]),
-    /missing baseUrl or token/
+    /must specify either a token or passthrough/
   );
 });
 
-test('constructor throws when an entry is missing its base URL', () => {
+test('constructor throws when an entry sets both a token and passthrough', () => {
   assert.throws(
-    () => new TokenRegistry([{ baseUrl: '', token: 'token-a' }]),
-    /missing baseUrl or token/
+    () =>
+      new TokenRegistry([
+        { baseUrl: 'https://argo-a.example.com', token: 'token-a', passthrough: true }
+      ]),
+    /cannot set both a token and passthrough/
   );
 });
 
 test('constructor error does not leak the token value', () => {
   assert.throws(
-    () => new TokenRegistry([{ baseUrl: '', token: 'super-secret-token' }]),
+    () =>
+      new TokenRegistry([
+        { baseUrl: 'https://argo-a.example.com', token: 'super-secret-token', passthrough: true }
+      ]),
     (error: unknown) => {
       assert.ok(error instanceof Error);
       assert.ok(!error.message.includes('super-secret-token'));
       return true;
     }
   );
+});
+
+test('constructor accepts a passthrough entry with no static token', () => {
+  const registry = new TokenRegistry([
+    { baseUrl: 'https://argo-a.example.com', passthrough: true }
+  ]);
+  assert.equal(registry.getSize(), 1);
+  assert.equal(registry.getToken('https://argo-a.example.com'), undefined);
+  assert.equal(registry.isPassthrough('https://argo-a.example.com'), true);
+});
+
+test('isPassthrough is false for a static-token entry and unregistered URLs', () => {
+  const registry = new TokenRegistry([
+    { baseUrl: 'https://argo-a.example.com', token: 'token-a' },
+    { baseUrl: 'https://argo-b.example.com', passthrough: true }
+  ]);
+  assert.equal(registry.isPassthrough('https://argo-a.example.com'), false);
+  assert.equal(registry.isPassthrough('https://argo-b.example.com'), true);
+  assert.equal(registry.isPassthrough('https://argo-c.example.com'), false);
+  assert.equal(registry.isPassthrough(''), false);
 });
 
 // --- parseTokenRegistry --------------------------------------------------

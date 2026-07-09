@@ -387,15 +387,18 @@ export class Server extends McpServer {
   // overridden per call via the argocdBaseUrl argument; the API token is never a
   // tool argument and is resolved by the following precedence:
   //
-  //   1. Request token  — the session token from the x-argocd-api-token header /
-  //      ARGOCD_API_TOKEN env var. If the caller supplied one, it ALWAYS wins.
-  //   2. Registry token — when no request token was supplied, look the resolved
-  //      base URL up in the configured token registry (ARGOCD_TOKEN_REGISTRY)
-  //      and use its token if the base URL is registered.
+  //   1. Default base URL  — the request token (x-argocd-api-token header /
+  //      ARGOCD_API_TOKEN env var) is used, falling back to a static registry
+  //      token if the default URL is also registered. Original behaviour.
+  //   2. Registry static token — a base URL registered with a static token
+  //      always uses that token (the request token never overrides it).
+  //   3. Registry passthrough — a base URL registered with passthrough: true
+  //      forwards the request token, letting the end user's identity reach that
+  //      instance (for auditability) with no per-instance token to mint.
   //
-  // This lets a single server target multiple ArgoCD instances, each with its
-  // own token, without the token ever appearing in a tool-call payload: callers
-  // pass only the (non-secret) base URL and the server pairs it with the token.
+  // Any base URL that is neither the default nor registered is rejected: the
+  // request token is only forwarded to pre-approved URLs, so a prompt-injected
+  // argocdBaseUrl value cannot redirect the token to an arbitrary host.
   private resolveClient(args: ArgoCDArgs): ArgoCDClient {
     const baseUrl = args.argocdBaseUrl || this.defaultBaseUrl;
 
@@ -409,17 +412,22 @@ export class Server extends McpServer {
       );
     }
 
-    // Resolve the token for this base URL. The default (session) token is bound
-    // to the default base URL ONLY: it must never be paired with a caller-
-    // supplied base URL, or an attacker (or prompt-injected model) could set
-    // argocdBaseUrl to an arbitrary host and have the server send the default
-    // token there (token exfiltration). For any overridden base URL, the token
-    // must come from the registry — i.e. the operator explicitly registered it.
+    // Resolve the token for this base URL. The request token is only ever
+    // forwarded to the default URL or to a registered passthrough URL; a URL
+    // with a static registry token always uses that token, and any other URL is
+    // rejected below — preventing a prompt-injected argocdBaseUrl from
+    // exfiltrating the request token to an arbitrary host.
     const isDefaultBaseUrl =
       TokenRegistry.normalize(baseUrl) === TokenRegistry.normalize(this.defaultBaseUrl);
-    const apiToken = isDefaultBaseUrl
-      ? this.defaultApiToken || this.tokenRegistry.getToken(baseUrl)
-      : this.tokenRegistry.getToken(baseUrl);
+    const registryToken = this.tokenRegistry.getToken(baseUrl);
+    let apiToken: string | undefined;
+    if (isDefaultBaseUrl) {
+      apiToken = this.defaultApiToken || registryToken;
+    } else if (registryToken) {
+      apiToken = registryToken;
+    } else if (this.tokenRegistry.isPassthrough(baseUrl)) {
+      apiToken = this.defaultApiToken;
+    }
 
     if (!apiToken) {
       throw new Error(

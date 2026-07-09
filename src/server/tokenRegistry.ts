@@ -1,22 +1,35 @@
 import { readFileSync } from 'node:fs';
 import { logger } from '../logging/logging.js';
 
-// A read-only registry that maps an ArgoCD base URL to the API token that
-// should be used for it. It lets a single server target multiple ArgoCD
-// instances — each with its own token — without the token ever being passed in
-// a tool-call payload: the caller supplies only the (non-secret) base URL and
-// the server pairs it with the configured token.
+// A read-only registry that maps an ArgoCD base URL to how it should be
+// authenticated. It lets a single server target multiple ArgoCD instances
+// without any token ever being passed in a tool-call payload: the caller
+// supplies only the (non-secret) base URL and the server resolves the token.
+//
+// Each entry authenticates a base URL one of two ways (exactly one is required):
+//
+//   • token       — a static token configured for that instance. The token
+//                   never leaves the server; the caller only references the URL.
+//   • passthrough — forward the caller's per-request token (the JWT from the
+//                   x-argocd-api-token header) to that instance. This lets the
+//                   end user's own identity flow through for auditability, with
+//                   no per-instance token to mint. The forwarded token must be
+//                   one the instance accepts: an OIDC/SSO token whose audience
+//                   matches that instance's OIDC client. Each instance validates
+//                   its own audience, so a token is scoped to a single instance
+//                   and the caller presents the right token per request. See the
+//                   passthrough security notes in the README before enabling it.
 //
 // Configuration source: a JSON file whose path is given by the
 // ARGOCD_TOKEN_REGISTRY_PATH environment variable. The tokens are secrets, so
 // they are read from a file (e.g. a mounted Kubernetes secret) rather than an
 // env var, keeping them out of the process environment, crash dumps, and child
-// process inheritance. The file contains a JSON array of { baseUrl, token }
-// entries, e.g.
+// process inheritance. The file contains a JSON array of entries, e.g.
 //
 //   [
-//     {"baseUrl":"https://argo-a.example.com","token":"<token-a>"},
-//     {"baseUrl":"https://argo-b.example.com","token":"<token-b>"}
+//     {"baseUrl":"https://argo-a.example.com","passthrough":true},
+//     {"baseUrl":"https://argo-b.example.com","passthrough":true},
+//     {"baseUrl":"https://argo-legacy.example.com","token":"<static-token>"}
 //   ]
 //
 // Base URLs are normalized (lowercased host, trailing slashes stripped) so
@@ -24,32 +37,65 @@ import { logger } from '../logging/logging.js';
 // value don't cause a lookup miss.
 export type TokenRegistryEntry = {
   baseUrl: string;
-  token: string;
+  token?: string;
+  passthrough?: boolean;
+};
+
+type RegistryEntry = {
+  token?: string;
+  passthrough: boolean;
 };
 
 export class TokenRegistry {
-  private tokensByBaseUrl = new Map<string, string>();
+  private entriesByBaseUrl = new Map<string, RegistryEntry>();
 
   constructor(entries: TokenRegistryEntry[] = []) {
     for (const entry of entries) {
-      if (!entry.baseUrl || !entry.token) {
-        // Fail closed: a missing baseUrl/token is a misconfigured credential,
-        // not something to silently skip. Don't include the token in the error.
-        throw new Error('ArgoCD token registry entry is missing baseUrl or token');
+      if (!entry.baseUrl) {
+        throw new Error('ArgoCD token registry entry is missing baseUrl');
       }
-      this.tokensByBaseUrl.set(TokenRegistry.normalize(entry.baseUrl), entry.token);
+      const hasToken = !!entry.token;
+      const passthrough = entry.passthrough === true;
+      // Fail closed: an entry must authenticate exactly one way. Requiring an
+      // explicit `passthrough: true` (rather than treating an empty token as
+      // passthrough) means a secret that fails to mount — leaving token blank —
+      // crashes at startup instead of silently forwarding the caller's JWT.
+      // Never include the token value in these errors.
+      if (!hasToken && !passthrough) {
+        throw new Error(
+          `ArgoCD token registry entry for "${entry.baseUrl}" must specify either a token or passthrough: true`
+        );
+      }
+      if (hasToken && passthrough) {
+        throw new Error(
+          `ArgoCD token registry entry for "${entry.baseUrl}" cannot set both a token and passthrough: true`
+        );
+      }
+      this.entriesByBaseUrl.set(TokenRegistry.normalize(entry.baseUrl), {
+        token: hasToken ? entry.token : undefined,
+        passthrough
+      });
     }
   }
 
-  // Returns the configured token for the given base URL, or undefined when the
-  // base URL is not registered.
+  // Returns the configured static token for the given base URL, or undefined
+  // when the base URL is not registered or is a passthrough entry (no static
+  // token).
   public getToken(baseUrl: string): string | undefined {
     if (!baseUrl) return undefined;
-    return this.tokensByBaseUrl.get(TokenRegistry.normalize(baseUrl));
+    return this.entriesByBaseUrl.get(TokenRegistry.normalize(baseUrl))?.token;
+  }
+
+  // Returns true when the base URL is registered as a passthrough entry, meaning
+  // the caller's per-request token should be forwarded to it. Used to decide
+  // whether to forward the JWT to a non-default URL.
+  public isPassthrough(baseUrl: string): boolean {
+    if (!baseUrl) return false;
+    return this.entriesByBaseUrl.get(TokenRegistry.normalize(baseUrl))?.passthrough ?? false;
   }
 
   public getSize(): number {
-    return this.tokensByBaseUrl.size;
+    return this.entriesByBaseUrl.size;
   }
 
   // Normalize a base URL for stable lookups: lowercase the scheme+host and drop
