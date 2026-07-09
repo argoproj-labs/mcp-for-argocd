@@ -8,7 +8,8 @@ import {
   V1alpha1ResourceDiff,
   V1alpha1ResourceResult,
   V1alpha1ApplicationResourceResult,
-  V1alpha1ClusterList
+  V1alpha1ClusterList,
+  V1alpha1AppProject
 } from '../types/argocd-types.js';
 import { HttpClient } from './http.js';
 
@@ -85,6 +86,11 @@ export class ArgoCDClient {
       `/api/v1/applications/${applicationName}`,
       queryParams
     );
+    return body;
+  }
+
+  public async getAppProject(projectName: string) {
+    const { body } = await this.client.get<V1alpha1AppProject>(`/api/v1/projects/${projectName}`);
     return body;
   }
 

@@ -124,6 +124,14 @@ export class Server extends McpServer {
         await client.getApplication(applicationName, applicationNamespace)
     );
     this.addJsonOutputTool(
+      'get_appproject',
+      'get_appproject returns an ArgoCD AppProject (project) by its name. AppProjects provide a logical grouping of applications and define allowed sources, destinations, cluster/repository whitelists, and RBAC roles.',
+      {
+        projectName: z.string().describe('The name of the ArgoCD AppProject to fetch.')
+      },
+      async ({ projectName }, client) => await client.getAppProject(projectName)
+    );
+    this.addJsonOutputTool(
       'get_application_resource_tree',
       'get_application_resource_tree returns resource tree for application by application name. Optionally specify the application namespace to get resource tree from applications in non-default namespaces.',
       {
