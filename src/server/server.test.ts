@@ -175,3 +175,96 @@ test('with no default token, an overridden URL still resolves only from the regi
   assert.equal(result.isError, true);
   assert.match(textOf(result), /Missing required ArgoCD API token/);
 });
+
+// ApplicationSet tool tests - verify they're registered and follow the same token resolution rules
+test('applicationset tools are registered', async () => {
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry()
+  });
+
+  // Verify read-only ApplicationSet tools are registered
+  const readOnlyTools = [
+    'list_applicationsets',
+    'get_applicationset',
+    'get_applicationset_resource_tree',
+    'generate_applicationset',
+    'preview_applicationset'
+  ];
+
+  for (const toolName of readOnlyTools) {
+    const registered = (
+      server as unknown as {
+        _registeredTools: Record<string, unknown>;
+      }
+    )._registeredTools;
+    assert.ok(registered[toolName], `read-only tool "${toolName}" is registered`);
+  }
+});
+
+test('applicationset tools respect token resolution rules', async () => {
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry()
+  });
+
+  // Test that list_applicationsets follows same token rules as list_applications
+  const result = await callTool(server, 'list_applicationsets', { argocdBaseUrl: EVIL_BASE_URL });
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /Missing required ArgoCD API token/);
+  assert.match(textOf(result), new RegExp(EVIL_BASE_URL));
+});
+
+test('applicationset modification tools respect read-only mode', async () => {
+  // Save original env
+  const originalReadOnly = process.env.MCP_READ_ONLY;
+
+  // Test with read-only mode enabled
+  process.env.MCP_READ_ONLY = 'true';
+  const readOnlyServer = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry()
+  });
+
+  const readOnlyRegistered = (
+    readOnlyServer as unknown as {
+      _registeredTools: Record<string, unknown>;
+    }
+  )._registeredTools;
+
+  const modTools = ['create_applicationset', 'update_applicationset', 'delete_applicationset'];
+
+  for (const toolName of modTools) {
+    assert.ok(
+      !readOnlyRegistered[toolName],
+      `mod tool "${toolName}" NOT registered in read-only mode`
+    );
+  }
+
+  // Test with read-only mode disabled
+  process.env.MCP_READ_ONLY = 'false';
+  const writableServer = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry()
+  });
+
+  const writableRegistered = (
+    writableServer as unknown as {
+      _registeredTools: Record<string, unknown>;
+    }
+  )._registeredTools;
+
+  for (const toolName of modTools) {
+    assert.ok(
+      writableRegistered[toolName],
+      `mod tool "${toolName}" IS registered in writable mode`
+    );
+  }
+
+  // Restore env
+  process.env.MCP_READ_ONLY = originalReadOnly;
+});
