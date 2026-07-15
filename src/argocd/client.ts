@@ -56,7 +56,10 @@ export class ArgoCDClient {
       Object.keys(queryParams).length > 0 ? queryParams : undefined
     );
 
-    // Strip heavy fields to reduce token usage
+    // Strip heavy fields to reduce token usage: the full source (helm/kustomize
+    // parameters), sync.comparedTo (a copy of source + destination) and
+    // status.summary (image/URL lists) are dropped; get_application returns
+    // the complete resource for a single application.
     let strippedItems =
       body.items?.map((app) => ({
         metadata: {
@@ -67,13 +70,20 @@ export class ArgoCDClient {
         },
         spec: {
           project: app.spec?.project,
-          source: app.spec?.source,
+          source: app.spec?.source && {
+            repoURL: app.spec.source.repoURL,
+            path: app.spec.source.path,
+            chart: app.spec.source.chart,
+            targetRevision: app.spec.source.targetRevision
+          },
           destination: app.spec?.destination
         },
         status: {
-          sync: app.status?.sync,
-          health: app.status?.health,
-          summary: app.status?.summary
+          sync: app.status?.sync && {
+            status: app.status.sync.status,
+            revision: app.status.sync.revision
+          },
+          health: app.status?.health
         }
       })) ?? [];
 
