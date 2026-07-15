@@ -76,6 +76,18 @@ export class Server extends McpServer {
           .describe(
             'Search applications by name. This is a partial match on the application name and does not support glob patterns (e.g. "*"). Optional.'
           ),
+        project: z
+          .string()
+          .optional()
+          .describe(
+            'Filter applications by ArgoCD project name (exact match, applied server-side by the ArgoCD API). Use list_projects to discover project names. Optional.'
+          ),
+        destCluster: z
+          .string()
+          .optional()
+          .describe(
+            'Filter applications by destination cluster, accepting either a cluster name (e.g. "in-cluster") or an API server URL (e.g. "https://10.0.0.1:6443"). The identifier is resolved against the registered clusters, so applications that reference their destination by the other identifier are matched too. Applied before pagination. Use list_clusters to discover cluster names and server URLs. Optional.'
+          ),
         limit: z
           .number()
           .int()
@@ -93,9 +105,11 @@ export class Server extends McpServer {
             'Number of applications to skip before returning results. Use with limit for pagination. Optional.'
           )
       },
-      async ({ search, limit, offset }, client) =>
+      async ({ search, project, destCluster, limit, offset }, client) =>
         await client.listApplications({
           search: search ?? undefined,
+          project: project ?? undefined,
+          destCluster: destCluster ?? undefined,
           limit,
           offset
         })
@@ -130,6 +144,12 @@ export class Server extends McpServer {
         projectName: z.string().describe('The name of the ArgoCD AppProject to fetch.')
       },
       async ({ projectName }, client) => await client.getAppProject(projectName)
+    );
+    this.addJsonOutputTool(
+      'list_projects',
+      'list_projects returns the list of ArgoCD AppProjects with their name, description, source repositories and allowed destinations (clusters/namespaces). Use it to discover which projects exist and which clusters they may deploy to; use get_appproject for the full details of a single project.',
+      {},
+      async (_args, client) => await client.listProjects()
     );
     this.addJsonOutputTool(
       'get_application_resource_tree',

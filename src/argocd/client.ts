@@ -9,9 +9,23 @@ import {
   V1alpha1ResourceResult,
   V1alpha1ApplicationResourceResult,
   V1alpha1ClusterList,
-  V1alpha1AppProject
+  V1alpha1AppProject,
+  V1alpha1AppProjectList
 } from '../types/argocd-types.js';
 import { HttpClient } from './http.js';
+
+/**
+ * Matches an application destination against a set of cluster identifiers
+ * (names and/or API server URLs). Applications may reference their destination
+ * cluster either by name (`spec.destination.name`) or by API server URL
+ * (`spec.destination.server`), so both fields are checked.
+ */
+export const matchesDestCluster = (
+  destination: { name?: string; server?: string } | undefined,
+  identifiers: ReadonlySet<string>
+): boolean =>
+  (destination?.name != null && identifiers.has(destination.name)) ||
+  (destination?.server != null && identifiers.has(destination.server));
 
 export class ArgoCDClient {
   private baseUrl: string;
@@ -24,14 +38,26 @@ export class ArgoCDClient {
     this.client = new HttpClient(this.baseUrl, this.apiToken);
   }
 
-  public async listApplications(params?: { search?: string; limit?: number; offset?: number }) {
+  public async listApplications(params?: {
+    search?: string;
+    project?: string;
+    destCluster?: string;
+    limit?: number;
+    offset?: number;
+  }) {
+    const queryParams: Record<string, string> = {};
+    if (params?.search) queryParams.search = params.search;
+    // The ArgoCD API filters by project server-side via the (repeatable)
+    // `projects` query parameter; a single value is enough here.
+    if (params?.project) queryParams.projects = params.project;
+
     const { body } = await this.client.get<V1alpha1ApplicationList>(
       `/api/v1/applications`,
-      params?.search ? { search: params.search } : undefined
+      Object.keys(queryParams).length > 0 ? queryParams : undefined
     );
 
     // Strip heavy fields to reduce token usage
-    const strippedItems =
+    let strippedItems =
       body.items?.map((app) => ({
         metadata: {
           name: app.metadata?.name,
@@ -51,6 +77,18 @@ export class ArgoCDClient {
         }
       })) ?? [];
 
+    // The applications list API cannot filter by destination cluster, so the
+    // filter is applied here, after stripping and before pagination. The
+    // identifier is first resolved against the registered clusters so that
+    // applications referencing the destination by the other identifier (name
+    // vs. API server URL) are matched too.
+    if (params?.destCluster) {
+      const identifiers = await this.resolveDestClusterIdentifiers(params.destCluster);
+      strippedItems = strippedItems.filter((app) =>
+        matchesDestCluster(app.spec.destination, identifiers)
+      );
+    }
+
     // Apply pagination
     const start = params?.offset ?? 0;
     const end = params?.limit ? start + params.limit : strippedItems.length;
@@ -65,6 +103,28 @@ export class ArgoCDClient {
         hasMore: end < strippedItems.length
       }
     };
+  }
+
+  /**
+   * Expands a destination-cluster identifier (name or API server URL) with the
+   * matching registered cluster's other identifier, so applications that
+   * reference the destination either way are matched. Falls back to the raw
+   * identifier when the clusters cannot be listed (e.g. missing RBAC).
+   */
+  private async resolveDestClusterIdentifiers(destCluster: string): Promise<Set<string>> {
+    const identifiers = new Set([destCluster]);
+    try {
+      const clusters = await this.listClusters();
+      for (const cluster of clusters.items ?? []) {
+        if (cluster.name === destCluster || cluster.server === destCluster) {
+          if (cluster.name) identifiers.add(cluster.name);
+          if (cluster.server) identifiers.add(cluster.server);
+        }
+      }
+    } catch {
+      // Ignore: matching proceeds with the raw identifier only.
+    }
+    return identifiers;
   }
 
   public async listClusters(params?: { server?: string; name?: string }) {
@@ -92,6 +152,34 @@ export class ArgoCDClient {
   public async getAppProject(projectName: string) {
     const { body } = await this.client.get<V1alpha1AppProject>(`/api/v1/projects/${projectName}`);
     return body;
+  }
+
+  public async listProjects() {
+    const { body } = await this.client.get<V1alpha1AppProjectList>(`/api/v1/projects`);
+
+    // Strip heavy fields to reduce token usage; get_appproject returns the
+    // full resource for a single project.
+    const items =
+      body.items?.map((project) => ({
+        metadata: {
+          name: project.metadata?.name,
+          labels: project.metadata?.labels,
+          creationTimestamp: project.metadata?.creationTimestamp
+        },
+        spec: {
+          description: project.spec?.description,
+          sourceRepos: project.spec?.sourceRepos,
+          destinations: project.spec?.destinations
+        }
+      })) ?? [];
+
+    return {
+      items,
+      metadata: {
+        resourceVersion: body.metadata?.resourceVersion,
+        totalItems: items.length
+      }
+    };
   }
 
   public async createApplication(application: V1alpha1Application) {
