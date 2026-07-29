@@ -115,13 +115,19 @@ export class Server extends McpServer {
     );
     this.addJsonOutputTool(
       'get_application',
-      'get_application returns application by application name. Optionally specify the application namespace to get applications from non-default namespaces.',
+      'get_application returns application by application name. Optionally specify the application namespace to get applications from non-default namespaces. Optionally request a refresh to reconcile the application against its source before returning.',
       {
         applicationName: z.string(),
-        applicationNamespace: ApplicationNamespaceSchema.optional()
+        applicationNamespace: ApplicationNamespaceSchema.optional(),
+        refresh: z
+          .enum(['normal', 'hard'])
+          .optional()
+          .describe(
+            'Refresh the application before returning it. "normal" re-compares live state against the cached manifests; "hard" additionally discards the cached manifests and re-generates them from the source repository (equivalent to "Hard Refresh" in the ArgoCD UI). Use "hard" when the rendered manifests may be stale — for example with config management plugins whose output is not a pure function of the Git revision. Omit to return the application without refreshing.'
+          )
       },
-      async ({ applicationName, applicationNamespace }, client) =>
-        await client.getApplication(applicationName, applicationNamespace)
+      async ({ applicationName, applicationNamespace, refresh }, client) =>
+        await client.getApplication(applicationName, applicationNamespace, refresh)
     );
     this.addJsonOutputTool(
       'get_appproject',
