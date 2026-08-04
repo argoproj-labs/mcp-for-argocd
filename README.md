@@ -50,6 +50,7 @@ The server provides the following ArgoCD management tools:
 - `update_application`: Update an existing application
 - `delete_application`: Delete an application
 - `sync_application`: Trigger a sync operation on an application
+- `set_application_parameters`: Set and unset Helm and Kustomize parameter overrides on an application
 
 ### Resource Management
 - `get_application_resource_tree`: Get the resource tree for a specific application
@@ -58,6 +59,55 @@ The server provides the following ArgoCD management tools:
 - `get_resource_events`: Get events for resources managed by an application
 - `get_resource_actions`: Get available actions for resources
 - `run_resource_action`: Run an action on a resource
+
+### Parameter Overrides
+
+`set_application_parameters` writes Helm and Kustomize overrides to the Application spec — the
+same place `argocd app set -p` writes them. Argo CD has no sync-time override channel, so
+overrides are always persisted rather than applied to a single sync.
+
+Values you list are upserted and values you do not list are kept. Removal is explicit, via
+`unset`. Because `unset` is applied before the set values, one call can replace a list
+wholesale: unset the entries you no longer want and set the ones you do.
+
+Three behaviours worth knowing:
+
+- **On an application with an automated sync policy, this call deploys.** Argo CD picks up the
+  spec change without any further request. The response reports `autoSyncEnabled` so you can
+  see when that is the case.
+- **The response reports `durability`.** When `durable` is `false`, the application is generated
+  by an ApplicationSet or managed by a parent application, and the override is likely to be
+  reverted on the next reconcile. The reported `note` gives the condition under which it
+  survives instead: for an ApplicationSet, that the ApplicationSet leaves this path alone —
+  usually `ignoreApplicationDifferences` for it, or an `applicationsSync` policy that does not
+  update generated applications, such as create-only; for a parent application, that `selfHeal`
+  is disabled. The write still happens; the report tells you whether it will last, as far as it
+  can see — detection reads owner references, so an ApplicationSet generating applications into a
+  namespace other than its own leaves no owner reference on them and they are reported durable.
+- **`dryRun` is a local preview.** It shows the merged result without writing, but it cannot
+  detect server-side failures such as a parameter the chart rejects.
+
+`helm.valueFiles` appends rather than replacing the list. Value file order matters in Helm —
+later files win — so an appended file takes precedence over the ones already there. To place it
+earlier, unset the existing entries and set the full desired order in the same call.
+
+Kustomize images are matched on the image name, which is everything before the first of `=`,
+`:`, `@` that occurs anywhere in the entry, tried in that priority order — so an `=` anywhere
+beats a `:` that appears earlier. This mirrors `argocd app set --kustomize-image`, so the same
+input produces the same `images` list either way. `nginx:1.3` therefore replaces an existing
+`nginx:1.2` rather than stacking a second override. Two consequences of the rule look like bugs
+and are not:
+
+- A digest keys on more than the repository. `nginx@sha256:abc` is matched on `nginx@sha256`, so
+  overriding a tagged `nginx:1.2` with a digest **appends a second entry** instead of replacing
+  the tagged one.
+- With no `=` in the entry, the registry port is swallowed. `localhost:5000/nginx:1.2` is matched
+  on `localhost`, so it **displaces an unrelated `localhost:5000/redis:1.0`** — both key on
+  `localhost`.
+
+Both match what `argocd app set --kustomize-image` already does, and are kept for parity with it.
+Check the returned `changes` list: each entry names the key the image was matched on and the
+entry, if any, it replaced.
 
 ## Installation
 
@@ -252,6 +302,7 @@ This will disable the following tools:
 - `update_application`
 - `delete_application`
 - `sync_application`
+- `set_application_parameters`
 - `run_resource_action`
 
 By default, all the tools will be available.
