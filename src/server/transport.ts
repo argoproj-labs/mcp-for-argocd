@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { tokenRegistryFromEnv } from './tokenRegistry.js';
+import { authConfigFromEnv, createAuthMiddleware } from './auth.js';
 
 // Load the base-URL -> token registry once at startup from the JSON file at
 // ARGOCD_TOKEN_REGISTRY_PATH. Shared across all connections; read-only after
@@ -24,8 +25,18 @@ export const connectStdioTransport = () => {
   server.connect(new StdioServerTransport());
 };
 
+// Enforce inbound JWT auth on MCP routes when configured (MCP_AUTH_* env
+// vars). /healthz stays open for Kubernetes probes.
+const applyInboundAuth = (app: express.Express, paths: string[]) => {
+  const authConfig = authConfigFromEnv();
+  if (!authConfig) return;
+  app.use(paths, createAuthMiddleware(authConfig));
+  logger.info(`Inbound JWT auth enabled on ${paths.join(', ')} (header: ${authConfig.header})`);
+};
+
 export const connectSSETransport = (port: number) => {
   const app = express();
+  applyInboundAuth(app, ['/sse', '/messages']);
   const transports: { [sessionId: string]: SSEServerTransport } = {};
 
   app.get('/sse', async (req, res) => {
@@ -97,6 +108,8 @@ export const connectHttpTransport = (port: number, stateless = false) => {
   app.get('/healthz', (_, res) => {
     res.status(200).json({ status: 'ok' });
   });
+
+  applyInboundAuth(app, ['/mcp']);
 
   const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
 
