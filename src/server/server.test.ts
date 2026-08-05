@@ -160,6 +160,75 @@ test('overriding argocdBaseUrl to a different instance with no registry entry se
   assert.match(textOf(result), new RegExp(EVIL_BASE_URL));
 });
 
+// --- Response-size guard -----------------------------------------------------
+//
+// Tool responses above MCP_MAX_RESPONSE_CHARS must be replaced by an error that
+// tells the model how to narrow the query, instead of returning a payload that
+// floods (or exceeds) the client's context window.
+
+// Create a server with MCP_MAX_RESPONSE_CHARS set to `maxChars` for the
+// duration of construction (the constructor reads it once).
+const createServerWithMaxChars = (maxChars: string) => {
+  const original = process.env.MCP_MAX_RESPONSE_CHARS;
+  process.env.MCP_MAX_RESPONSE_CHARS = maxChars;
+  try {
+    return createServer({
+      argocdBaseUrl: DEFAULT_BASE_URL,
+      argocdApiToken: DEFAULT_TOKEN,
+      tokenRegistry: new TokenRegistry()
+    });
+  } finally {
+    if (original === undefined) {
+      delete process.env.MCP_MAX_RESPONSE_CHARS;
+    } else {
+      process.env.MCP_MAX_RESPONSE_CHARS = original;
+    }
+  }
+};
+
+const manyApps = {
+  items: Array.from({ length: 20 }, (_, i) => ({
+    metadata: { name: `app-${i}`, namespace: 'argocd' },
+    spec: { project: 'default' },
+    status: { sync: { status: 'Synced' }, health: { status: 'Healthy' } }
+  }))
+};
+
+test('a response over MCP_MAX_RESPONSE_CHARS is replaced with a narrowing error', async (t) => {
+  t.mock.method(
+    globalThis,
+    'fetch',
+    async (): Promise<Response> => new Response(JSON.stringify(manyApps), { status: 200 })
+  );
+  const server = createServerWithMaxChars('200');
+
+  const result = await callTool(server, 'list_applications', {});
+
+  assert.equal(result.isError, true);
+  const text = textOf(result);
+  assert.match(text, /list_applications response too large/);
+  assert.match(text, /200-character limit/);
+  // The per-tool hint tells the model which parameters narrow the response.
+  assert.match(text, /limit/);
+  assert.match(text, /detail:"name"/);
+  // The oversized payload itself must not leak through.
+  assert.ok(!text.includes('app-0'));
+});
+
+test('MCP_MAX_RESPONSE_CHARS=0 disables the size guard', async (t) => {
+  t.mock.method(
+    globalThis,
+    'fetch',
+    async (): Promise<Response> => new Response(JSON.stringify(manyApps), { status: 200 })
+  );
+  const server = createServerWithMaxChars('0');
+
+  const result = await callTool(server, 'list_applications', {});
+
+  assert.equal(result.isError, false);
+  assert.ok(textOf(result).includes('app-0'));
+});
+
 test('with no default token, an overridden URL still resolves only from the registry', async () => {
   // Tokenless session (allowed when a registry is configured). The default token
   // is empty, so even the default URL has no token, and an unregistered override
