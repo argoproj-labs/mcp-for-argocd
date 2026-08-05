@@ -256,6 +256,23 @@ This will disable the following tools:
 
 By default, all the tools will be available.
 
+### Inbound Request Authentication
+
+By default the HTTP/SSE endpoints accept unauthenticated requests. If the server runs behind an identity-aware proxy (Cloudflare Access, Google IAP, oauth2-proxy, ...) that authenticates users at the edge and forwards a signed JWT, the server can verify that JWT on every inbound MCP request — so requests that bypass the proxy and hit the port directly are rejected with `401`.
+
+Enable it by setting all of:
+
+| Variable | Meaning |
+| --- | --- |
+| `MCP_AUTH_JWKS_URL` | JWKS endpoint of the token issuer, e.g. `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs` |
+| `MCP_AUTH_ISSUER` | Expected `iss` claim, e.g. `https://<team>.cloudflareaccess.com` |
+| `MCP_AUTH_AUDIENCE` | Expected `aud` claim (the proxy application's audience tag) |
+| `MCP_AUTH_TOKEN_HEADER` | Optional. Header carrying the JWT. Defaults to `authorization` (Bearer scheme); Cloudflare Access sends `cf-access-jwt-assertion` |
+
+Tokens are verified: RS256 signature against the JWKS, plus the `iss`, `aud` and `exp` claims. `/healthz` stays open for Kubernetes probes.
+
+By default (no `MCP_AUTH_*` variables set), inbound requests are not authenticated. Setting only some of the required variables is a misconfiguration: the server fails at startup instead of silently running unauthenticated.
+
 ### Stateless Mode
 
 By default, the HTTP transport assigns a session ID to each client connection and keeps an in-memory map of active sessions. This works well for single-instance deployments but causes `400` errors when multiple replicas are running without sticky sessions, because a request routed to a different pod will not find the session that was created on the original pod.
