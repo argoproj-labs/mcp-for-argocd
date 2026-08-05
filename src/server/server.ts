@@ -68,7 +68,7 @@ export class Server extends McpServer {
     // Always register read/query tools
     this.addJsonOutputTool(
       'list_applications',
-      'list_applications returns list of applications',
+      'list_applications returns a page of applications with their project, source and sync/health status. Filters (search by name, project, destCluster) are applied server-side, so filtering is always cheaper and more reliable than listing everything and picking by eye. The response carries metadata.totalItems and metadata.hasMore: page with offset until hasMore is false to cover the whole set.',
       {
         search: z
           .string()
@@ -94,7 +94,7 @@ export class Server extends McpServer {
           .positive()
           .optional()
           .describe(
-            'Maximum number of applications to return. Use this to reduce token usage when there are many applications. Optional.'
+            'Maximum number of applications to return, 1-200. Defaults to 50 when omitted: the response is always a bounded page, never the whole inventory. Optional.'
           ),
         offset: z
           .number()
@@ -116,7 +116,7 @@ export class Server extends McpServer {
     );
     this.addJsonOutputTool(
       'list_clusters',
-      'list_clusters returns list of clusters registered with ArgoCD',
+      'list_clusters returns every cluster registered with ArgoCD: name, API server URL, connection status, Kubernetes version and application count. The list is complete — it is not paginated and heavy per-cluster details (API versions, connection config, cache stats) are omitted, so the whole inventory fits in a single response.',
       {
         server: z.string().optional().describe('Filter clusters by server URL. Optional.'),
         name: z.string().optional().describe('Filter clusters by name. Optional.')
@@ -147,9 +147,31 @@ export class Server extends McpServer {
     );
     this.addJsonOutputTool(
       'list_projects',
-      'list_projects returns the list of ArgoCD AppProjects with their name, description, source repositories and allowed destinations (clusters/namespaces). Use it to discover which projects exist and which clusters they may deploy to; use get_appproject for the full details of a single project.',
-      {},
-      async (_args, client) => await client.listProjects()
+      'list_projects returns the ArgoCD AppProjects: name, description and how many source repositories and destinations each one allows. Use it to discover which projects exist; use get_appproject when the actual repository and destination lists of a single project are needed. Projects are not clusters — a project is a logical grouping of applications and may be named after something else entirely; use list_clusters for the cluster inventory.',
+      {
+        search: z
+          .string()
+          .optional()
+          .describe('Filter projects by name, partial match, case-insensitive. Optional.'),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            'Maximum number of projects to return, 1-200. Defaults to 50 when omitted. Optional.'
+          ),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe(
+            'Number of projects to skip before returning results. Use with limit for pagination. Optional.'
+          )
+      },
+      async ({ search, limit, offset }, client) =>
+        await client.listProjects({ search: search ?? undefined, limit, offset })
     );
     this.addJsonOutputTool(
       'get_application_resource_tree',

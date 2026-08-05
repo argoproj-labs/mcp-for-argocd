@@ -27,6 +27,31 @@ export const matchesDestCluster = (
   (destination?.name != null && identifiers.has(destination.name)) ||
   (destination?.server != null && identifiers.has(destination.server));
 
+// MCP clients cap the size of a tool result and cut the middle out of anything
+// larger, which turns an oversized list into a silently partial one. The list
+// tools therefore paginate by default instead of returning everything: a short
+// page plus explicit `hasMore` is always a correct answer, a truncated JSON
+// never is.
+const DEFAULT_LIST_LIMIT = 50;
+const MAX_LIST_LIMIT = 200;
+
+const paginate = <T>(items: T[], params?: { limit?: number; offset?: number }) => {
+  const start = Math.max(params?.offset ?? 0, 0);
+  const limit = Math.min(Math.max(params?.limit ?? DEFAULT_LIST_LIMIT, 1), MAX_LIST_LIMIT);
+  const end = start + limit;
+  const page = items.slice(start, end);
+  return {
+    items: page,
+    metadata: {
+      totalItems: items.length,
+      returnedItems: page.length,
+      offset: start,
+      limit,
+      hasMore: end < items.length
+    }
+  };
+};
+
 export class ArgoCDClient {
   private baseUrl: string;
   private apiToken: string;
@@ -99,18 +124,16 @@ export class ArgoCDClient {
       );
     }
 
-    // Apply pagination
-    const start = params?.offset ?? 0;
-    const end = params?.limit ? start + params.limit : strippedItems.length;
-    const items = strippedItems.slice(start, end);
+    // Apply pagination. The limit is enforced even when the caller omits it:
+    // an unfiltered inventory is thousands of applications and would come back
+    // to the model with its middle cut away.
+    const { items, metadata } = paginate(strippedItems, params);
 
     return {
       items,
       metadata: {
         resourceVersion: body.metadata?.resourceVersion,
-        totalItems: strippedItems.length,
-        returnedItems: items.length,
-        hasMore: end < strippedItems.length
+        ...metadata
       }
     };
   }
@@ -147,7 +170,34 @@ export class ArgoCDClient {
       Object.keys(queryParams).length > 0 ? queryParams : undefined
     );
 
-    return body;
+    // Cluster items are stripped for the same reason as the application ones:
+    // info.apiVersions alone lists every group/version served by a cluster
+    // (hundreds of strings each), and config/info.cacheInfo add more weight on
+    // top. A deployment with a few dozen clusters overflows the client-side
+    // output limit, the middle of the list is cut away and the caller silently
+    // receives a partial inventory. Identity plus health is what a list is for;
+    // the connection message is kept because there is no per-cluster get tool
+    // to fall back to when a cluster is unreachable.
+    const items =
+      body.items?.map((cluster) => ({
+        name: cluster.name,
+        server: cluster.server,
+        serverVersion: cluster.serverVersion || cluster.info?.serverVersion,
+        applicationsCount: cluster.info?.applicationsCount,
+        connectionState: cluster.connectionState && {
+          status: cluster.connectionState.status,
+          message: cluster.connectionState.message,
+          attemptedAt: cluster.connectionState.attemptedAt
+        }
+      })) ?? [];
+
+    return {
+      items,
+      metadata: {
+        resourceVersion: body.metadata?.resourceVersion,
+        totalItems: items.length
+      }
+    };
   }
 
   public async getApplication(applicationName: string, appNamespace?: string) {
@@ -164,30 +214,38 @@ export class ArgoCDClient {
     return body;
   }
 
-  public async listProjects() {
+  public async listProjects(params?: { search?: string; limit?: number; offset?: number }) {
     const { body } = await this.client.get<V1alpha1AppProjectList>(`/api/v1/projects`);
 
-    // Strip heavy fields to reduce token usage; get_appproject returns the
-    // full resource for a single project.
-    const items =
+    // A project list answers "which projects exist"; the repository allow-list
+    // and the destination allow-list behind each project are what make the
+    // response heavy, so they are reduced to counts here and returned in full
+    // by get_appproject for the single project the caller cares about.
+    let strippedItems =
       body.items?.map((project) => ({
-        metadata: {
-          name: project.metadata?.name,
-          labels: project.metadata?.labels,
-          creationTimestamp: project.metadata?.creationTimestamp
-        },
-        spec: {
-          description: project.spec?.description,
-          sourceRepos: project.spec?.sourceRepos,
-          destinations: project.spec?.destinations
-        }
+        name: project.metadata?.name,
+        description: project.spec?.description,
+        sourceReposCount: project.spec?.sourceRepos?.length ?? 0,
+        destinationsCount: project.spec?.destinations?.length ?? 0,
+        creationTimestamp: project.metadata?.creationTimestamp
       })) ?? [];
+
+    // The projects API has no server-side search, so the substring filter is
+    // applied here — same contract as list_applications.
+    if (params?.search) {
+      const needle = params.search.toLowerCase();
+      strippedItems = strippedItems.filter((project) =>
+        project.name?.toLowerCase().includes(needle)
+      );
+    }
+
+    const { items, metadata } = paginate(strippedItems, params);
 
     return {
       items,
       metadata: {
         resourceVersion: body.metadata?.resourceVersion,
-        totalItems: items.length
+        ...metadata
       }
     };
   }
