@@ -24,7 +24,7 @@ export const connectStdioTransport = () => {
   server.connect(new StdioServerTransport());
 };
 
-export const connectSSETransport = (port: number) => {
+export const connectSSETransport = (port: number, host?: string) => {
   const app = express();
   const transports: { [sessionId: string]: SSEServerTransport } = {};
 
@@ -53,8 +53,8 @@ export const connectSSETransport = (port: number) => {
     }
   });
 
-  logger.info(`Connecting to SSE transport on port: ${port}`);
-  app.listen(port);
+  logger.info(`Connecting to SSE transport on port: ${port}${host ? ` (host: ${host})` : ''}`);
+  return host ? app.listen(port, host) : app.listen(port);
 };
 
 // Resolve the session-level ArgoCD credentials from headers or env.
@@ -90,7 +90,7 @@ const resolveCredentials = (
   return { argocdBaseUrl, argocdApiToken };
 };
 
-export const connectHttpTransport = (port: number, stateless = false) => {
+export const connectHttpTransport = (port: number, stateless = false, host?: string) => {
   const app = express();
   app.use(express.json());
 
@@ -161,7 +161,7 @@ export const connectHttpTransport = (port: number, stateless = false) => {
   app.delete('/mcp', handleSessionRequest);
 
   logger.info(
-    `Connecting to Http Stream transport on port: ${port}${stateless ? ' (stateless mode)' : ''}`
+    `Connecting to Http Stream transport on port: ${port}${stateless ? ' (stateless mode)' : ''}${host ? ` (host: ${host})` : ''}`
   );
-  app.listen(port);
+  return host ? app.listen(port, host) : app.listen(port);
 };

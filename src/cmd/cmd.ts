@@ -20,12 +20,21 @@ export const cmd = () => {
     'sse',
     'Start ArgoCD MCP server using SSE.',
     (yargs) => {
-      return yargs.option('port', {
-        type: 'number',
-        default: 3000
-      });
+      return yargs
+        .option('port', {
+          type: 'number',
+          default: 3000
+        })
+        .option('host', {
+          type: 'string',
+          default: process.env.LISTEN_HOST ?? '',
+          description:
+            'Host/interface to bind to, e.g. 127.0.0.1 (env: LISTEN_HOST; default: all interfaces)'
+        });
     },
-    ({ port }) => connectSSETransport(port)
+    ({ port, host }) => {
+      connectSSETransport(port, host || undefined);
+    }
   );
 
   exe.command(
@@ -41,9 +50,17 @@ export const cmd = () => {
           type: 'boolean',
           default: false,
           description: 'Run in stateless mode'
+        })
+        .option('host', {
+          type: 'string',
+          default: process.env.LISTEN_HOST ?? '',
+          description:
+            'Host/interface to bind to, e.g. 127.0.0.1 (env: LISTEN_HOST; default: all interfaces)'
         });
     },
-    ({ port, stateless }) => connectHttpTransport(port, stateless)
+    ({ port, stateless, host }) => {
+      connectHttpTransport(port, stateless, host || undefined);
+    }
   );
 
   exe.demandCommand().parseSync();

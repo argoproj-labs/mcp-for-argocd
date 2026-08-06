@@ -280,6 +280,18 @@ In stateless mode:
 
 This mode is recommended for Kubernetes deployments with Horizontal Pod Autoscaling (HPA) where network-level sticky sessions are not available.
 
+### Bind Host
+
+By default, the `http` and `sse` transports listen on all network interfaces. To restrict which interface the server binds to, pass the `--host` flag or set the `LISTEN_HOST` environment variable:
+
+```bash
+node dist/index.js http --host 127.0.0.1
+# or
+LISTEN_HOST=127.0.0.1 node dist/index.js http
+```
+
+Binding to `127.0.0.1` makes the server reachable only from the same host (or the same pod when run as a Kubernetes sidecar). Note that a loopback-bound server is not reachable by Kubernetes `httpGet` probes, which connect via the pod IP — use an `exec` probe instead.
+
 ## For Development
 
 1. Clone the repository:
