@@ -55,7 +55,9 @@ The server provides the following ArgoCD management tools:
 - `get_application_resource_tree`: Get the resource tree for a specific application
 - `get_application_managed_resources`: Get managed resources for a specific application
 - `get_application_workload_logs`: Get logs for application workloads (Pods, Deployments, etc.)
+- `get_application_events`: Get events for a specific application
 - `get_resource_events`: Get events for resources managed by an application
+- `get_resources`: Get resource manifests for a specific application
 - `get_resource_actions`: Get available actions for resources
 - `run_resource_action`: Run an action on a resource
 
