@@ -175,3 +175,152 @@ test('with no default token, an overridden URL still resolves only from the regi
   assert.equal(result.isError, true);
   assert.match(textOf(result), /Missing required ArgoCD API token/);
 });
+
+// --- Profile (context) selector tools ------------------------------------
+
+// Parse a tool's JSON result payload (the tools serialize their return value as
+// a single JSON text block).
+const jsonOf = (result: { content: { text: string }[] }): Record<string, unknown> =>
+  JSON.parse(textOf(result));
+
+test('list_profiles returns names + baseUrls (no token) and the active/default profile', async () => {
+  const registry = new TokenRegistry([
+    { name: 'prod', baseUrl: DEFAULT_BASE_URL, token: DEFAULT_TOKEN, default: true },
+    { name: 'other', baseUrl: OTHER_BASE_URL, token: 'super-secret-token' }
+  ]);
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: registry
+  });
+
+  const result = await callTool(server, 'list_profiles', {});
+  assert.equal(result.isError ?? false, false);
+  const text = textOf(result);
+  assert.ok(!text.includes('super-secret-token'));
+  assert.ok(!text.includes(DEFAULT_TOKEN));
+  const payload = jsonOf(result);
+  assert.deepEqual(payload.profiles, [
+    { name: 'prod', baseUrl: DEFAULT_BASE_URL },
+    { name: 'other', baseUrl: OTHER_BASE_URL }
+  ]);
+  assert.equal(payload.active, 'prod');
+  assert.equal(payload.default, 'prod');
+});
+
+test('list_profiles returns an empty list when no profiles are configured', async () => {
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry()
+  });
+
+  const payload = jsonOf(await callTool(server, 'list_profiles', {}));
+  assert.deepEqual(payload, { profiles: [], active: null, default: null });
+});
+
+test('get_current_profile reflects the registry default profile', async () => {
+  const registry = new TokenRegistry([
+    { name: 'prod', baseUrl: DEFAULT_BASE_URL, token: DEFAULT_TOKEN, default: true }
+  ]);
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: registry
+  });
+
+  const payload = jsonOf(await callTool(server, 'get_current_profile', {}));
+  assert.deepEqual(payload, { name: 'prod', baseUrl: DEFAULT_BASE_URL });
+});
+
+test('get_current_profile falls back to the default base URL when no profile is active', async () => {
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry()
+  });
+
+  const payload = jsonOf(await callTool(server, 'get_current_profile', {}));
+  assert.deepEqual(payload, { active: null, defaultBaseUrl: DEFAULT_BASE_URL });
+});
+
+test('set_profile to an unknown name returns an error', async () => {
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry()
+  });
+
+  const result = await callTool(server, 'set_profile', { name: 'nope' });
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /Unknown ArgoCD profile "nope"/);
+});
+
+test('set_profile switches the active profile so later calls target its instance with the registry token', async () => {
+  // 'other' points at a non-default host whose token comes ONLY from the
+  // registry. After selecting it, resolveClient must pair the other host with
+  // the registry token — never the default token (the exfiltration invariant).
+  const registry = new TokenRegistry([
+    { name: 'other', baseUrl: OTHER_BASE_URL, token: 'registered-token' }
+  ]);
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: registry
+  });
+
+  const setResult = await callTool(server, 'set_profile', { name: 'other' });
+  assert.equal(setResult.isError ?? false, false);
+  assert.deepEqual(jsonOf(setResult), { profile: { name: 'other', baseUrl: OTHER_BASE_URL } });
+
+  const client = (
+    server as unknown as {
+      resolveClient: (a: { argocdBaseUrl?: string }) => unknown;
+    }
+  ).resolveClient({}) as { client: { apiToken: string; baseUrl: string } };
+
+  assert.equal(client.client.baseUrl, OTHER_BASE_URL);
+  assert.equal(client.client.apiToken, 'registered-token');
+  assert.notEqual(client.client.apiToken, DEFAULT_TOKEN);
+});
+
+test('selecting a profile on a non-default host never borrows the default token', async () => {
+  // A profile whose host is NOT registered with a token must fail to resolve a
+  // token rather than fall back to the default token. We simulate this by
+  // pointing the active profile at the default host's neighbor via a registry
+  // entry that exists for routing but whose host differs from the default.
+  // Here the only profile lives on OTHER_BASE_URL with its own token, and we
+  // additionally prove that a tool call to a *different* unregistered host
+  // (EVIL) is still rejected even while a profile is active.
+  const registry = new TokenRegistry([
+    { name: 'other', baseUrl: OTHER_BASE_URL, token: 'registered-token' }
+  ]);
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: registry
+  });
+
+  await callTool(server, 'set_profile', { name: 'other' });
+  // Explicit per-call override still wins and is still subject to the token
+  // boundary: EVIL is unregistered, so no token resolves and no request is sent.
+  const result = await callTool(server, 'list_applications', { argocdBaseUrl: EVIL_BASE_URL });
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /Missing required ArgoCD API token/);
+});
+
+test('set_profile warns that the change does not persist in stateless mode', async () => {
+  const registry = new TokenRegistry([
+    { name: 'prod', baseUrl: DEFAULT_BASE_URL, token: DEFAULT_TOKEN }
+  ]);
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: registry,
+    stateless: true
+  });
+
+  const payload = jsonOf(await callTool(server, 'set_profile', { name: 'prod' }));
+  assert.deepEqual(payload.profile, { name: 'prod', baseUrl: DEFAULT_BASE_URL });
+  assert.match(String(payload.warning), /does not persist|stateless/i);
+});
