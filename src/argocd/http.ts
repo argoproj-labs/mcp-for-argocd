@@ -1,3 +1,27 @@
+// Exchange a username/password for a session token via ArgoCD's login endpoint,
+// so a username/password credential can be used everywhere an API token is
+// (ARGOCD_API_TOKEN, x-argocd-api-token). ArgoCD issues this token with a fixed
+// expiry (24h by default) and it is not refreshed here.
+export const login = async (
+  baseUrl: string,
+  username: string,
+  password: string
+): Promise<string> => {
+  const response = await fetch(new URL('/api/v1/session', baseUrl), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  });
+  if (!response.ok) {
+    throw new Error(`ArgoCD login failed with status ${response.status}`);
+  }
+  const body = (await response.json()) as { token?: string };
+  if (!body.token) {
+    throw new Error('ArgoCD login response did not include a token');
+  }
+  return body.token;
+};
+
 export interface HttpResponse<T> {
   status: number;
   headers: Headers;
