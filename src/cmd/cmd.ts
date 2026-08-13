@@ -79,15 +79,16 @@ const transportOptions = (argv: ListenerArgv): TransportOptions => ({
   allowUnauthenticated: argv.allowUnauthenticated
 });
 
-// resolveListenerSecurity throws on a configuration it cannot honour. Report it as
-// a startup error rather than an unhandled exception stack.
-const start = (run: () => void) => {
-  try {
-    run();
-  } catch (err) {
-    logger.error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  }
+// resolveListenerSecurity throws on a configuration it cannot honour, and
+// connectStdioTransport's login step can reject. Report either as a startup
+// error rather than an unhandled exception stack.
+const start = (run: () => unknown) => {
+  Promise.resolve()
+    .then(run)
+    .catch((err) => {
+      logger.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    });
 };
 
 export const cmd = () => {
@@ -97,7 +98,7 @@ export const cmd = () => {
     'stdio',
     'Start ArgoCD MCP server using stdio.',
     () => {},
-    () => connectStdioTransport()
+    () => start(() => connectStdioTransport())
   );
 
   exe.command('sse', 'Start ArgoCD MCP server using SSE.', listenerOptions, (argv) =>

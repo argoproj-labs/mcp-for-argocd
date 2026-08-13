@@ -165,6 +165,15 @@ This token is **outbound only**: it authenticates this server to ArgoCD and neve
 
 This is the **default token**. It is **mandatory unless a [token registry](#token-registry--per-base-url-tokens-multi-instance) is configured**: on the HTTP transport, a connection that supplies no token (neither header nor env var) is rejected with `400 Bad Request`, but when a registry is configured a tokenless connection is allowed because each call resolves its own [registry token](#two-kinds-of-token). Keeping the token out of tool arguments ensures it never enters prompts, model context, or tool-call logs.
 
+#### Username/password — alternative to an API token
+
+If you don't have (or don't want to use) an API token, supply a username and password instead and the server logs in to ArgoCD's `/api/v1/session` endpoint for you:
+
+- **HTTP headers** (HTTP transport only): `x-argocd-username` / `x-argocd-password`.
+- **Environment variables**: `ARGOCD_USERNAME` / `ARGOCD_PASSWORD` (all transports).
+
+This requires a base URL to be known at connect time (`x-argocd-base-url` header or `ARGOCD_BASE_URL` env var) — the login request has to go somewhere. The resulting session token is used exactly like `ARGOCD_API_TOKEN` for the rest of the session, and is **not refreshed**: ArgoCD's session tokens expire (24h by default), so a session that outlives that window needs a fresh connection. An API token, when present, always takes priority over username/password.
+
 #### Base URL — header / env var, or per-call argument
 
 The base URL may be supplied at the session level (resolved once when the server starts or when an HTTP client connects):
