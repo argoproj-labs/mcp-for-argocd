@@ -269,7 +269,7 @@ Enable it by setting all of:
 | `MCP_AUTH_AUDIENCE` | Expected `aud` claim (the proxy application's audience tag) |
 | `MCP_AUTH_TOKEN_HEADER` | Optional. Header carrying the JWT. Defaults to `authorization` (Bearer scheme); Cloudflare Access sends `cf-access-jwt-assertion` |
 
-Tokens are verified: RS256 signature against the JWKS, plus the `iss`, `aud` and `exp` claims. `/healthz` stays open for Kubernetes probes.
+Tokens are verified: signature (RS256 or ES256) against the JWKS, plus the `iss`, `aud` and `exp` claims. `/healthz` stays open for Kubernetes probes.
 
 By default (no `MCP_AUTH_*` variables set), inbound requests are not authenticated. Setting only some of the required variables is a misconfiguration: the server fails at startup instead of silently running unauthenticated.
 

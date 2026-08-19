@@ -103,13 +103,14 @@ const resolveCredentials = (
 
 export const connectHttpTransport = (port: number, stateless = false) => {
   const app = express();
+  // Auth before body parsing: unauthenticated requests are rejected without
+  // spending cycles on their payloads.
+  applyInboundAuth(app, ['/mcp']);
   app.use(express.json());
 
   app.get('/healthz', (_, res) => {
     res.status(200).json({ status: 'ok' });
   });
-
-  applyInboundAuth(app, ['/mcp']);
 
   const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
 

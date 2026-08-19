@@ -66,7 +66,8 @@ export const createAuthMiddleware = (
       const { payload } = await jwtVerify(token, keySource, {
         issuer: config.issuer,
         audience: config.audience,
-        algorithms: ['RS256'],
+        // RS256: Cloudflare Access, oauth2-proxy. ES256: Google IAP.
+        algorithms: ['RS256', 'ES256'],
         clockTolerance: CLOCK_TOLERANCE,
         requiredClaims: ['exp']
       });

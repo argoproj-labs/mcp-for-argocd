@@ -67,6 +67,30 @@ test('accepts a valid token', async () => {
   assert.equal(result.status, null);
 });
 
+test('accepts a valid ES256 token (Google IAP)', async () => {
+  const esKeys = await generateKeyPair('ES256');
+  const token = await new SignJWT({ email: 'user@example.com' })
+    .setProtectedHeader({ alg: 'ES256' })
+    .setIssuer(ISSUER)
+    .setAudience(AUDIENCE)
+    .setExpirationTime('5m')
+    .sign(esKeys.privateKey);
+  const req = { headers: { [HEADER]: token }, method: 'POST', path: '/mcp' } as unknown as Request;
+  let nextCalled = false;
+  const res = {
+    status() {
+      return this;
+    },
+    send() {
+      return this;
+    }
+  } as unknown as Response;
+  await createAuthMiddleware(config, async () => esKeys.publicKey)(req, res, () => {
+    nextCalled = true;
+  });
+  assert.equal(nextCalled, true);
+});
+
 test('rejects a request without the token header', async () => {
   const result = await run({});
   assert.equal(result.nextCalled, false);
