@@ -30,5 +30,14 @@ FROM base
 COPY --from=prod-deps /app/node_modules /app/node_modules
 COPY --from=build /app/dist /app/dist
 EXPOSE 3000
-CMD [ "node", "dist/index.js", "http" ]
+# No MCP_BIND_ADDRESS here on purpose. The image keeps the loopback default, which
+# a sidecar or any other container sharing this network namespace can reach.
+# Publishing a port is the case that needs a wider bind, and that stays an explicit
+# `-e MCP_BIND_ADDRESS=0.0.0.0` alongside an inbound credential. See "Network
+# Exposure" in the README.
+#
+# Split so that overriding the command only replaces the arguments, not the
+# interpreter: `docker run <image> http --stateless` works as written.
+ENTRYPOINT [ "node", "dist/index.js" ]
+CMD [ "http" ]
 USER 1000

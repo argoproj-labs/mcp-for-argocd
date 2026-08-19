@@ -4,10 +4,16 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { logger } from '../logging/logging.js';
 import { createServer } from './server.js';
 import { randomUUID } from 'node:crypto';
+import type { AddressInfo } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { tokenRegistryFromEnv } from './tokenRegistry.js';
 import { authConfigFromEnv, createAuthMiddleware } from './auth.js';
+import {
+  applyListenerSecurity,
+  resolveListenerSecurity,
+  type ListenerSecurityOptions
+} from './security.js';
 
 // Load the base-URL -> token registry once at startup from the JSON file at
 // ARGOCD_TOKEN_REGISTRY_PATH. Shared across all connections; read-only after
@@ -25,8 +31,11 @@ export const connectStdioTransport = () => {
   server.connect(new StdioServerTransport());
 };
 
-// Enforce inbound JWT auth on MCP routes when configured (MCP_AUTH_* env
-// vars). /healthz stays open for Kubernetes probes.
+export type TransportOptions = ListenerSecurityOptions;
+
+// Enforce inbound JWT auth on MCP routes when configured (MCP_AUTH_JWKS_URL &
+// co., for deployments behind an identity-aware proxy). Complements the
+// listener security middleware. /healthz stays open for Kubernetes probes.
 const applyInboundAuth = (app: express.Express, paths: string[]) => {
   const authConfig = authConfigFromEnv();
   if (!authConfig) return;
@@ -34,38 +43,29 @@ const applyInboundAuth = (app: express.Express, paths: string[]) => {
   logger.info(`Inbound JWT auth enabled on ${paths.join(', ')} (header: ${authConfig.header})`);
 };
 
-export const connectSSETransport = (port: number) => {
-  const app = express();
-  applyInboundAuth(app, ['/sse', '/messages']);
-  const transports: { [sessionId: string]: SSEServerTransport } = {};
-
-  app.get('/sse', async (req, res) => {
-    const server = createServer({
-      argocdBaseUrl: (req.headers['x-argocd-base-url'] as string) || '',
-      argocdApiToken: (req.headers['x-argocd-api-token'] as string) || '',
-      tokenRegistry
-    });
-
-    const transport = new SSEServerTransport('/messages', res);
-    transports[transport.sessionId] = transport;
-    res.on('close', () => {
-      delete transports[transport.sessionId];
-    });
-    await server.connect(transport);
+// Liveness probe, registered before the security middleware: a kubelet probe
+// addresses the pod IP and carries no bearer token. Reports only that we are up.
+const registerHealthz = (app: express.Express) => {
+  app.get('/healthz', (_, res) => {
+    res.status(200).json({ status: 'ok' });
   });
+};
 
-  app.post('/messages', async (req, res) => {
-    const sessionId = req.query.sessionId as string;
-    const transport = transports[sessionId];
-    if (transport) {
-      await transport.handlePostMessage(req, res);
-    } else {
-      res.status(400).send(`No transport found for sessionId: ${sessionId}`);
-    }
+// Log the address actually bound, so an operator can see whether the listener is
+// loopback-only or exposed. Both handlers hang off events rather than
+// app.listen()'s callback, which Express invokes even when the bind fails, with
+// server.address() still null.
+const listen = (app: express.Express, bindAddress: string, port: number, label: string) => {
+  const server = app.listen(port, bindAddress);
+  server.on('listening', () => {
+    const { address, port: boundPort } = server.address() as AddressInfo;
+    logger.info(`${label} listening on ${address}:${boundPort}`);
   });
-
-  logger.info(`Connecting to SSE transport on port: ${port}`);
-  app.listen(port);
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    logger.error(`${label} could not bind ${bindAddress}:${port}: ${err.code ?? err.message}`);
+    process.exit(1);
+  });
+  return server;
 };
 
 // Resolve the session-level ArgoCD credentials from headers or env.
@@ -81,6 +81,9 @@ export const connectSSETransport = (port: number) => {
 //
 // The base URL is optional at this level: when it is absent, callers may supply
 // it per call via the argocdBaseUrl tool argument.
+//
+// These are outbound credentials only. Inbound authorization is the listener's
+// job (MCP_AUTH_TOKEN, see security.ts).
 const resolveCredentials = (
   req: express.Request,
   res: express.Response
@@ -101,16 +104,55 @@ const resolveCredentials = (
   return { argocdBaseUrl, argocdApiToken };
 };
 
-export const connectHttpTransport = (port: number, stateless = false) => {
+export const connectSSETransport = (options: TransportOptions) => {
+  const security = resolveListenerSecurity(options);
+  const { port } = options;
   const app = express();
-  // Auth before body parsing: unauthenticated requests are rejected without
-  // spending cycles on their payloads.
-  applyInboundAuth(app, ['/mcp']);
-  app.use(express.json());
+  registerHealthz(app);
+  applyListenerSecurity(app, security);
+  applyInboundAuth(app, ['/sse', '/messages']);
+  const transports: { [sessionId: string]: SSEServerTransport } = {};
 
-  app.get('/healthz', (_, res) => {
-    res.status(200).json({ status: 'ok' });
+  app.get('/sse', async (req, res) => {
+    // Same credential requirement as the http transport. Without it the handler
+    // built an McpServer with empty credentials and held it until the socket
+    // closed, one per connection.
+    const credentials = resolveCredentials(req, res);
+    if (!credentials) return;
+    const server = createServer({ ...credentials, tokenRegistry });
+
+    const transport = new SSEServerTransport('/messages', res);
+    transports[transport.sessionId] = transport;
+    res.on('close', () => {
+      delete transports[transport.sessionId];
+    });
+    await server.connect(transport);
   });
+
+  app.post('/messages', async (req, res) => {
+    const sessionId = req.query.sessionId as string;
+    const transport = transports[sessionId];
+    if (transport) {
+      await transport.handlePostMessage(req, res);
+    } else {
+      res.status(400).send(`No transport found for sessionId: ${sessionId}`);
+    }
+  });
+
+  return listen(app, security.bindAddress, port, 'SSE transport');
+};
+
+export const connectHttpTransport = (options: TransportOptions & { stateless?: boolean }) => {
+  const security = resolveListenerSecurity(options);
+  const { port, stateless = false } = options;
+  const app = express();
+  registerHealthz(app);
+  applyListenerSecurity(app, security);
+  applyInboundAuth(app, ['/mcp']);
+  // After the security and auth middleware, so malformed JSON returns 401/403
+  // rather than the body parser's 400, which would tell a caller it passed the
+  // credential check.
+  app.use(express.json());
 
   const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
 
@@ -174,8 +216,10 @@ export const connectHttpTransport = (port: number, stateless = false) => {
   app.get('/mcp', handleSessionRequest);
   app.delete('/mcp', handleSessionRequest);
 
-  logger.info(
-    `Connecting to Http Stream transport on port: ${port}${stateless ? ' (stateless mode)' : ''}`
+  return listen(
+    app,
+    security.bindAddress,
+    port,
+    `Http Stream transport${stateless ? ' (stateless mode)' : ''}`
   );
-  app.listen(port);
 };

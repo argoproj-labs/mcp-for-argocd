@@ -161,6 +161,8 @@ The ArgoCD **API token is a secret and is only ever read from the transport laye
 - **HTTP headers** (HTTP transport only): `x-argocd-api-token`.
 - **Environment variables**: `ARGOCD_API_TOKEN` (all transports).
 
+This token is **outbound only**: it authenticates this server to ArgoCD and never authorizes an inbound caller. See [Network Exposure](#network-exposure) for who may reach the listener.
+
 This is the **default token**. It is **mandatory unless a [token registry](#token-registry--per-base-url-tokens-multi-instance) is configured**: on the HTTP transport, a connection that supplies no token (neither header nor env var) is rejected with `400 Bad Request`, but when a registry is configured a tokenless connection is allowed because each call resolves its own [registry token](#two-kinds-of-token). Keeping the token out of tool arguments ensures it never enters prompts, model context, or tool-call logs.
 
 #### Base URL — header / env var, or per-call argument
@@ -241,6 +243,61 @@ For example, a `tools/call` request overriding only the base URL:
 
 > **Overriding the base URL to a different instance requires a registry token.** The default token (`x-argocd-api-token` / `ARGOCD_API_TOKEN`) is bound to the default base URL only and is never sent to a different host. Overriding `argocdBaseUrl` to point at the **default** instance (same host, formatting aside) reuses the default token; pointing it at any **other** instance requires a [registry token](#two-kinds-of-token) for that instance, otherwise the call fails with "Missing required ArgoCD API token" and no request is sent. This is intentional — see [why the default token is bound to the default base URL](#token-registry--per-base-url-tokens-multi-instance) above.
 
+### Network Exposure
+
+The `http` and `sse` transports open a network listener that reaches every ArgoCD tool, including `create_application`, `delete_application`, `sync_application`, and `run_resource_action`. By default it binds loopback only.
+
+**`ARGOCD_API_TOKEN` does not protect it.** That token authenticates this server *to ArgoCD*. It says nothing about who the caller is. Inbound access is controlled by the settings below.
+
+| Setting | Flag | Env var | Default | What it does |
+|---|---|---|---|---|
+| Bind address | `--bind-address` | `MCP_BIND_ADDRESS` | `127.0.0.1` | Which address the listener accepts connections on. |
+| Inbound token | — | `MCP_AUTH_TOKEN` | unset | When set, every request must carry `Authorization: Bearer <token>`. |
+| Allowed `Host` | `--allowed-host-header` | — | loopback names | Extra hostname accepted in a request's `Host` header. Repeat per name. |
+| Allowed `Origin` | `--allowed-origin` | — | loopback origins | Extra browser origin accepted in a request's `Origin` header. Repeat per origin. |
+| External auth | `--allow-unauthenticated` | — | `false` | Allows a non-loopback bind with no token, when something in front already authenticates callers. |
+| Port | `--port` | — | `3000` | Which port to listen on. |
+
+> `--bind-address` decides who may connect. `--allowed-host-header` only checks what an already-connected client claims. They are not a pair, and the second is not a firewall.
+
+Flags with no env var are passed as arguments, in a container too: `docker run <image> http --allow-unauthenticated`.
+
+Behaviour:
+
+- Widening the bind requires `MCP_AUTH_TOKEN` or `--allow-unauthenticated`. Otherwise the server logs why and exits non-zero instead of starting exposed.
+- `Origin` is always checked, on scheme, host, and port. This is what stops a malicious web page, including one using DNS rebinding.
+- `Host` is checked on a loopback bind, or on any bind with at least one `--allowed-host-header`. Otherwise the hostname clients legitimately use is unknown, so the check is skipped and a warning is logged.
+- `GET /healthz` is exempt, so a kubelet probe still succeeds. It returns liveness only.
+- Unusable configuration fails at startup with the reason, rather than being ignored.
+- [Read-only mode](#read-only-mode) is independent of all of this and caps what any caller can do.
+
+Exposing the listener deliberately:
+
+```bash
+export MCP_AUTH_TOKEN=<inbound_token>
+node dist/index.js http --bind-address 0.0.0.0 --allowed-host-header mcp.internal.example.com
+```
+
+The container image keeps the same loopback default, so it needs no extra configuration when the caller shares its network namespace, such as a sidecar in the same Kubernetes pod:
+
+```bash
+docker run -e ARGOCD_BASE_URL=<argocd_url> -e ARGOCD_API_TOKEN=<argocd_token> \
+  argoprojlabs/mcp-for-argocd
+```
+
+To publish a port, widen the bind and set an inbound credential:
+
+```bash
+docker run -p 3000:3000 \
+  -e ARGOCD_BASE_URL=<argocd_url> -e ARGOCD_API_TOKEN=<argocd_token> \
+  -e MCP_BIND_ADDRESS=0.0.0.0 -e MCP_AUTH_TOKEN=<inbound_token> \
+  argoprojlabs/mcp-for-argocd
+```
+
+When the bind is widened and a proxy or mesh already authenticates callers, use `--allow-unauthenticated` instead of `MCP_AUTH_TOKEN`.
+
+See [Operator notes](SECURITY.md#operator-notes-network-exposure) for the deployment caveats.
+
 ### Read Only Mode
 
 If you want to run the MCP Server in a ReadOnly mode to avoid resource or application modification, you should set the environment variable:
@@ -256,9 +313,9 @@ This will disable the following tools:
 
 By default, all the tools will be available.
 
-### Inbound Request Authentication
+### Inbound Request Authentication (JWT)
 
-By default the HTTP/SSE endpoints accept unauthenticated requests. If the server runs behind an identity-aware proxy (Cloudflare Access, Google IAP, oauth2-proxy, ...) that authenticates users at the edge and forwards a signed JWT, the server can verify that JWT on every inbound MCP request — so requests that bypass the proxy and hit the port directly are rejected with `401`.
+Complements [Network Exposure](#network-exposure): `MCP_AUTH_TOKEN` requires a static shared bearer token. If the server instead runs behind an identity-aware proxy (Cloudflare Access, Google IAP, oauth2-proxy, ...) that authenticates users at the edge and forwards a signed JWT, the server can verify that JWT on every inbound MCP request — so requests that bypass the proxy and hit the port directly are rejected with `401`.
 
 Enable it by setting all of:
 
@@ -286,9 +343,13 @@ node dist/index.js http --stateless
 Or with Docker:
 
 ```bash
-docker run -e ARGOCD_BASE_URL=<argocd_url> -e ARGOCD_API_TOKEN=<argocd_token> \
+docker run -p 3000:3000 \
+  -e ARGOCD_BASE_URL=<argocd_url> -e ARGOCD_API_TOKEN=<argocd_token> \
+  -e MCP_BIND_ADDRESS=0.0.0.0 -e MCP_AUTH_TOKEN=<inbound_token> \
   argoprojlabs/mcp-for-argocd http --stateless
 ```
+
+The image has an `ENTRYPOINT`, so overriding the command replaces only the arguments. Publishing a port is what makes the wider bind and the inbound token necessary here; see [Network Exposure](#network-exposure).
 
 In stateless mode:
 - No `Mcp-Session-Id` is returned or required — any replica can handle any request
@@ -339,6 +400,8 @@ To configure credentials, export the relevant environment variable on the comman
 | `ARGOCD_API_TOKEN` | Static API token for the default base URL. |
 | `ARGOCD_TOKEN_REGISTRY_PATH` | Path to a JSON [token registry](#token-registry--per-base-url-tokens-multi-instance) mapping base URLs to tokens (for targeting multiple instances). |
 
+These are all outbound credentials. For who may reach the listener, see [Network Exposure](#network-exposure).
+
 ```bash
 # Single instance with a static base URL + token:
 make run ARGOCD_BASE_URL=https://argo.example.com ARGOCD_API_TOKEN=<token>
@@ -362,7 +425,7 @@ See [Token resolution](#token-registry--per-base-url-tokens-multi-instance) for 
 
 > Do not place the registry file under `dist/` — `tsup` builds with `clean: true` and wipes that directory on every build.
 
-The HTTP server listens on `POST /mcp` (port `3000` by default) with a `GET /healthz` liveness endpoint. To send a request, first `initialize` a session (capture the `mcp-session-id` response header), then call a tool, passing one of the registered base URLs as the `argocdBaseUrl` argument:
+The HTTP server listens on `POST /mcp` (`127.0.0.1:3000` by default, see [Network Exposure](#network-exposure) to widen it) with a `GET /healthz` liveness endpoint. To send a request, first `initialize` a session (capture the `mcp-session-id` response header), then call a tool, passing one of the registered base URLs as the `argocdBaseUrl` argument:
 
 ```bash
 # 1. Initialize a session — note the mcp-session-id response header
