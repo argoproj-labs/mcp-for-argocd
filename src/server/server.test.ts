@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from './server.js';
 import { TokenRegistry } from './tokenRegistry.js';
+import { TokenRefresher } from '../argocd/tokenRefresher.js';
 
 // These tests exercise the per-call token-resolution boundary in resolveClient
 // via the registered tool handlers. The security-critical invariant is:
@@ -174,4 +175,109 @@ test('with no default token, an overridden URL still resolves only from the regi
   const result = await callTool(server, 'list_applications', { argocdBaseUrl: EVIL_BASE_URL });
   assert.equal(result.isError, true);
   assert.match(textOf(result), /Missing required ArgoCD API token/);
+});
+
+// --- get_session_info --------------------------------------------------------
+
+test('get_session_info fails with missing base URL error when server has no default URL', async () => {
+  const server = createServer({
+    argocdBaseUrl: '',
+    argocdApiToken: '',
+    tokenRegistry: new TokenRegistry([{ baseUrl: DEFAULT_BASE_URL, token: DEFAULT_TOKEN }])
+  });
+
+  const result = await callTool(server, 'get_session_info', {});
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /Missing required ArgoCD base URL/);
+});
+
+// --- refresh_token tool ------------------------------------------------------
+
+test('refresh_token tool is NOT registered when server has no tokenRefresher', () => {
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry()
+  });
+
+  const registered = (
+    server as unknown as { _registeredTools: Record<string, unknown> }
+  )._registeredTools;
+
+  assert.ok(!('refresh_token' in registered), 'refresh_token should not be registered');
+});
+
+test('refresh_token tool IS registered when server has a tokenRefresher', () => {
+  const refresher = new TokenRefresher({
+    contextName: 'test',
+    baseUrl: DEFAULT_BASE_URL,
+    refreshToken: 'rt',
+    performRefresh: async () => ({ authToken: 'x' }),
+    updateConfig: () => {}
+  });
+
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry(),
+    tokenRefresher: refresher
+  });
+
+  const registered = (
+    server as unknown as { _registeredTools: Record<string, unknown> }
+  )._registeredTools;
+
+  assert.ok('refresh_token' in registered, 'refresh_token should be registered');
+});
+
+test('refresh_token tool returns isError:true when refresh fails', async () => {
+  const refresher = new TokenRefresher({
+    contextName: 'test',
+    baseUrl: DEFAULT_BASE_URL,
+    refreshToken: 'rt',
+    performRefresh: async () => {
+      throw new Error('OIDC unavailable');
+    },
+    updateConfig: () => {}
+  });
+
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry(),
+    tokenRefresher: refresher
+  });
+
+  // Start without a callback so no side-effects; stop immediately to avoid timer leaks
+  refresher.start('');
+  refresher.stop();
+
+  const result = await callTool(server, 'refresh_token', {});
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /OIDC unavailable/);
+});
+
+test('refresh_token tool returns success when refresh succeeds', async () => {
+  const refresher = new TokenRefresher({
+    contextName: 'test',
+    baseUrl: DEFAULT_BASE_URL,
+    refreshToken: 'rt',
+    performRefresh: async () => ({ authToken: 'new-tok' }),
+    updateConfig: () => {}
+  });
+
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry(),
+    tokenRefresher: refresher
+  });
+
+  refresher.start('header.e30.sig'); // minimal valid JWT (empty payload)
+  refresher.stop();
+
+  const result = await callTool(server, 'refresh_token', {});
+  assert.equal(result.isError, false);
+  const body = JSON.parse(textOf(result));
+  assert.equal(body.success, true);
 });

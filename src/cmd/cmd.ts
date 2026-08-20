@@ -8,6 +8,8 @@ import {
 } from '../server/transport.js';
 import { DEFAULT_BIND_ADDRESS } from '../server/security.js';
 import { logger } from '../logging/logging.js';
+import { getContextInfo, type ArgocdContextInfo } from '../argocd/argocdConfig.js';
+import { TokenRefresher } from '../argocd/tokenRefresher.js';
 
 // Options shared by the two network transports. The inbound token is env-only:
 // argv is readable by every user on the machine via `ps`.
@@ -96,8 +98,40 @@ export const cmd = () => {
   exe.command(
     'stdio',
     'Start ArgoCD MCP server using stdio.',
-    () => {},
-    () => connectStdioTransport()
+    (yargs) =>
+      yargs.option('context', {
+        type: 'string',
+        description:
+          'ArgoCD CLI context name from ~/.config/argocd/config. ' +
+          'When set, credentials and base URL are read from that context and the ' +
+          'token is refreshed automatically before it expires.'
+      }),
+    (argv) => {
+      if (!argv.context) {
+        connectStdioTransport();
+        return;
+      }
+
+      let ctxInfo: ArgocdContextInfo;
+      try {
+        ctxInfo = getContextInfo(argv.context);
+      } catch (err) {
+        logger.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+
+      connectStdioTransport({
+        argocdBaseUrl: ctxInfo.baseUrl,
+        argocdApiToken: ctxInfo.authToken,
+        tokenRefresher: ctxInfo.refreshToken
+          ? new TokenRefresher({
+              contextName: argv.context,
+              baseUrl: ctxInfo.baseUrl,
+              refreshToken: ctxInfo.refreshToken
+            })
+          : undefined
+      });
+    }
   );
 
   exe.command('sse', 'Start ArgoCD MCP server using SSE.', listenerOptions, (argv) =>

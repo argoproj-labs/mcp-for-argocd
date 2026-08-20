@@ -10,6 +10,7 @@ import {
   ResourceRefSchema
 } from '../shared/models/schema.js';
 import { TokenRegistry, tokenRegistryFromEnv } from './tokenRegistry.js';
+import { TokenRefresher } from '../argocd/tokenRefresher.js';
 
 type ServerInfo = {
   argocdBaseUrl: string;
@@ -17,6 +18,9 @@ type ServerInfo = {
   // Optional registry mapping additional ArgoCD base URLs to their tokens. When
   // omitted, it is loaded from the ARGOCD_TOKEN_REGISTRY_PATH env var.
   tokenRegistry?: TokenRegistry;
+  // Optional background token refresher. When present, enables the
+  // refresh_token tool that forces an immediate token refresh.
+  tokenRefresher?: TokenRefresher;
 };
 
 // Per-call argument that any tool may accept to target a specific ArgoCD
@@ -45,6 +49,7 @@ export class Server extends McpServer {
   private defaultApiToken: string;
   private tokenRegistry: TokenRegistry;
   private argocdClient: ArgoCDClient;
+  private tokenRefresher: TokenRefresher | undefined;
   // Cache per-credential clients to avoid rebuilding the HttpClient on every
   // call. Keyed by baseUrl + token, since the same base URL may resolve to
   // different tokens (request token vs. registry token vs. default).
@@ -59,6 +64,7 @@ export class Server extends McpServer {
     this.defaultApiToken = serverInfo.argocdApiToken;
     this.tokenRegistry = serverInfo.tokenRegistry ?? tokenRegistryFromEnv();
     this.argocdClient = new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
+    this.tokenRefresher = serverInfo.tokenRefresher;
 
     const isReadOnly =
       String(process.env.MCP_READ_ONLY ?? '')
@@ -274,6 +280,48 @@ export class Server extends McpServer {
         )
     );
 
+    // Session / token tools — always available, read-only by nature
+    this.addJsonOutputTool(
+      'get_session_info',
+      'get_session_info returns the current ArgoCD session info: logged-in user, groups, ' +
+        'and the number of seconds until the authentication token expires.',
+      {},
+      async (_args, client) => await client.getSessionInfo()
+    );
+
+    // refresh_token is a credential-management tool, not a data write operation,
+    // so it is available regardless of MCP_READ_ONLY. Only registered when a
+    // TokenRefresher is present (i.e. server started with --context).
+    if (this.tokenRefresher) {
+      const refresher = this.tokenRefresher;
+      this.tool(
+        'refresh_token',
+        'refresh_token immediately refreshes the ArgoCD authentication token using the ' +
+          'stored refresh token. Only available when the server is started with --context. ' +
+          'Use this when the current token has expired or is about to expire.',
+        {},
+        async () => {
+          try {
+            await refresher.forceRefresh();
+            return {
+              isError: false,
+              content: [{ type: 'text' as const, text: JSON.stringify({ success: true }) }]
+            };
+          } catch (error) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text' as const,
+                  text: error instanceof Error ? error.message : String(error)
+                }
+              ]
+            };
+          }
+        }
+      );
+    }
+
     // Only register modification tools if not in read-only mode
     if (!isReadOnly) {
       this.addJsonOutputTool(
@@ -380,7 +428,18 @@ export class Server extends McpServer {
             action
           )
       );
+
     }
+  }
+
+  // Update the default token and propagate it to the cached default client.
+  // Called by TokenRefresher when a background refresh succeeds.
+  public updateToken(newToken: string): void {
+    this.defaultApiToken = newToken;
+    this.argocdClient.updateToken(newToken);
+    // Clear the client cache so subsequent calls with the default URL pick up
+    // the new token rather than an entry keyed on the old one.
+    this.clientCache.clear();
   }
 
   // Resolve the ArgoCD client to use for a single tool call. The base URL may be
