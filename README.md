@@ -45,7 +45,7 @@ The server provides the following ArgoCD management tools:
 
 ### Application Management
 - `list_applications`: List and filter all applications
-- `get_application`: Get detailed information about a specific application
+- `get_application`: Get detailed information about a specific application. Accepts an optional `refresh` (`normal` or `hard`) to reconcile the application against its source before returning; `hard` also re-generates manifests from the source repository, equivalent to "Hard Refresh" in the UI
 - `create_application`: Create a new application
 - `update_application`: Update an existing application
 - `delete_application`: Delete an application
