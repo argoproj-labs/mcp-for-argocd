@@ -68,7 +68,7 @@ export class Server extends McpServer {
     // Always register read/query tools
     this.addJsonOutputTool(
       'list_applications',
-      'list_applications returns list of applications',
+      'list_applications returns a page of applications with their project, source and sync/health status. Filters (search by name, project, destCluster) are applied server-side, so filtering is always cheaper and more reliable than listing everything and picking by eye. The response carries metadata.totalItems and metadata.hasMore: page with offset until hasMore is false to cover the whole set.',
       {
         search: z
           .string()
@@ -76,13 +76,25 @@ export class Server extends McpServer {
           .describe(
             'Search applications by name. This is a partial match on the application name and does not support glob patterns (e.g. "*"). Optional.'
           ),
+        project: z
+          .string()
+          .optional()
+          .describe(
+            'Filter applications by ArgoCD project name (exact match, applied server-side by the ArgoCD API). Use list_projects to discover project names. Optional.'
+          ),
+        destCluster: z
+          .string()
+          .optional()
+          .describe(
+            'Filter applications by destination cluster, accepting either a cluster name (e.g. "in-cluster") or an API server URL (e.g. "https://10.0.0.1:6443"). The identifier is resolved against the registered clusters, so applications that reference their destination by the other identifier are matched too. Applied before pagination. Use list_clusters to discover cluster names and server URLs. Optional.'
+          ),
         limit: z
           .number()
           .int()
           .positive()
           .optional()
           .describe(
-            'Maximum number of applications to return. Use this to reduce token usage when there are many applications. Optional.'
+            'Maximum number of applications to return, 1-200. Defaults to 50 when omitted: the response is always a bounded page, never the whole inventory. Optional.'
           ),
         offset: z
           .number()
@@ -93,16 +105,18 @@ export class Server extends McpServer {
             'Number of applications to skip before returning results. Use with limit for pagination. Optional.'
           )
       },
-      async ({ search, limit, offset }, client) =>
+      async ({ search, project, destCluster, limit, offset }, client) =>
         await client.listApplications({
           search: search ?? undefined,
+          project: project ?? undefined,
+          destCluster: destCluster ?? undefined,
           limit,
           offset
         })
     );
     this.addJsonOutputTool(
       'list_clusters',
-      'list_clusters returns list of clusters registered with ArgoCD',
+      'list_clusters returns every cluster registered with ArgoCD: name, API server URL, connection status, Kubernetes version and application count. The list is complete — it is not paginated and heavy per-cluster details (API versions, connection config, cache stats) are omitted, so the whole inventory fits in a single response.',
       {
         server: z.string().optional().describe('Filter clusters by server URL. Optional.'),
         name: z.string().optional().describe('Filter clusters by name. Optional.')
@@ -130,6 +144,34 @@ export class Server extends McpServer {
         projectName: z.string().describe('The name of the ArgoCD AppProject to fetch.')
       },
       async ({ projectName }, client) => await client.getAppProject(projectName)
+    );
+    this.addJsonOutputTool(
+      'list_projects',
+      'list_projects returns the ArgoCD AppProjects: name, description and how many source repositories and destinations each one allows. Use it to discover which projects exist; use get_appproject when the actual repository and destination lists of a single project are needed. Projects are not clusters — a project is a logical grouping of applications and may be named after something else entirely; use list_clusters for the cluster inventory.',
+      {
+        search: z
+          .string()
+          .optional()
+          .describe('Filter projects by name, partial match, case-insensitive. Optional.'),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            'Maximum number of projects to return, 1-200. Defaults to 50 when omitted. Optional.'
+          ),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe(
+            'Number of projects to skip before returning results. Use with limit for pagination. Optional.'
+          )
+      },
+      async ({ search, limit, offset }, client) =>
+        await client.listProjects({ search: search ?? undefined, limit, offset })
     );
     this.addJsonOutputTool(
       'get_application_resource_tree',
