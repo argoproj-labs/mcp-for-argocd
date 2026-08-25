@@ -229,6 +229,38 @@ test('MCP_MAX_RESPONSE_CHARS=0 disables the size guard', async (t) => {
   assert.ok(textOf(result).includes('app-0'));
 });
 
+test('an oversized response from a mutating tool is reported as success, not an error', async (t) => {
+  // By the time the guard runs, the sync has already happened. Flagging it as
+  // isError would invite the client to retry (re-syncing), so the payload is
+  // replaced with a success notice that says not to.
+  t.mock.method(
+    globalThis,
+    'fetch',
+    async (): Promise<Response> =>
+      new Response(
+        JSON.stringify({
+          metadata: { name: 'big-app', namespace: 'argocd' },
+          spec: { project: 'default', source: { helm: { values: 'x: y\n'.repeat(200) } } },
+          status: { sync: { status: 'Synced' }, health: { status: 'Healthy' } }
+        }),
+        { status: 200 }
+      )
+  );
+  const server = createServerWithMaxChars('200');
+
+  const result = await callTool(server, 'sync_application', { applicationName: 'big-app' });
+
+  assert.equal(result.isError, false);
+  const text = textOf(result);
+  assert.match(text, /sync_application completed successfully/);
+  assert.match(text, /200-character limit/);
+  assert.match(text, /Do not retry/);
+  // The per-tool hint points at the read tool that shows the outcome.
+  assert.match(text, /get_application/);
+  // The oversized payload itself must not leak through.
+  assert.ok(!text.includes('x: y'));
+});
+
 test('with no default token, an overridden URL still resolves only from the registry', async () => {
   // Tokenless session (allowed when a registry is configured). The default token
   // is empty, so even the default URL has no token, and an unregistered override

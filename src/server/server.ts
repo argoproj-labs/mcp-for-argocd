@@ -136,7 +136,10 @@ export class Server extends McpServer {
           repo,
           detail
         }),
-      'Narrow the query: lower `limit` (paging with `offset`), filter with `search`/`projects`/`selector`/`repo`, or set detail:"name" for a minimal fleet-wide listing.'
+      {
+        oversizeHint:
+          'Narrow the query: lower `limit` (paging with `offset`), filter with `search`/`projects`/`selector`/`repo`, or set detail:"name" for a minimal fleet-wide listing.'
+      }
     );
     this.addJsonOutputTool(
       'list_clusters',
@@ -315,7 +318,10 @@ export class Server extends McpServer {
           refs.map((ref) => client.getResource(applicationName, applicationNamespace, ref))
         );
       },
-      'Pass specific resourceRefs (from get_application_resource_tree) instead of fetching every resource in the application.'
+      {
+        oversizeHint:
+          'Pass specific resourceRefs (from get_application_resource_tree) instead of fetching every resource in the application.'
+      }
     );
     this.addJsonOutputTool(
       'get_resource_actions',
@@ -340,14 +346,22 @@ export class Server extends McpServer {
         'create_application creates a new ArgoCD application in the specified namespace. The application.metadata.namespace field determines where the Application resource will be created (e.g., "argocd", "argocd-apps", or any custom namespace).',
         { application: ApplicationSchema },
         async ({ application }, client) =>
-          await client.createApplication(application as V1alpha1Application)
+          await client.createApplication(application as V1alpha1Application),
+        {
+          mutating: true,
+          oversizeHint: 'Use get_application to inspect the created application.'
+        }
       );
       this.addJsonOutputTool(
         'update_application',
         'update_application updates application',
         { applicationName: z.string(), application: ApplicationSchema },
         async ({ applicationName, application }, client) =>
-          await client.updateApplication(applicationName, application as V1alpha1Application)
+          await client.updateApplication(applicationName, application as V1alpha1Application),
+        {
+          mutating: true,
+          oversizeHint: 'Use get_application to inspect the updated application.'
+        }
       );
       this.addJsonOutputTool(
         'delete_application',
@@ -376,7 +390,8 @@ export class Server extends McpServer {
             applicationName,
             Object.keys(options).length > 0 ? options : undefined
           );
-        }
+        },
+        { mutating: true }
       );
       this.addJsonOutputTool(
         'sync_application',
@@ -420,6 +435,10 @@ export class Server extends McpServer {
             applicationName,
             Object.keys(options).length > 0 ? options : undefined
           );
+        },
+        {
+          mutating: true,
+          oversizeHint: 'Use get_application to inspect the sync status.'
         }
       );
       this.addJsonOutputTool(
@@ -437,7 +456,11 @@ export class Server extends McpServer {
             applicationNamespace,
             resourceRef as V1alpha1ResourceResult,
             action
-          )
+          ),
+        {
+          mutating: true,
+          oversizeHint: 'Use get_application_resource_tree to inspect the affected resource.'
+        }
       );
     }
   }
@@ -504,8 +527,16 @@ export class Server extends McpServer {
     return client;
   }
 
-  // oversizeHint is appended to the size-guard error so the model knows which
-  // of the tool's parameters narrow the response.
+  // oversizeHint is appended to the size-guard message so the model knows how to
+  // proceed: for read tools, which parameters narrow the response; for mutating
+  // tools, how to inspect the result of an operation whose response was omitted.
+  //
+  // mutating marks tools whose callback changes ArgoCD state (create/update/
+  // delete/sync/run action). By the time the size guard runs, the operation has
+  // already happened, so an oversized response must never be reported as a tool
+  // error: a client that treats isError as failure would retry — repeating a
+  // sync, or failing a create with "already exists". Instead the payload is
+  // replaced with a success notice that says not to retry.
   private addJsonOutputTool<Args extends ZodRawShape, T>(
     name: string,
     description: string,
@@ -515,7 +546,7 @@ export class Server extends McpServer {
       client: ArgoCDClient,
       extra: Parameters<ToolCallback<Args>>[1]
     ) => T,
-    oversizeHint?: string
+    options?: { oversizeHint?: string; mutating?: boolean }
   ) {
     const mergedSchema = { ...paramsSchema, ...argoCDArgsSchema } as ZodRawShape;
     this.tool(name, description, mergedSchema, async (...args) => {
@@ -535,15 +566,31 @@ export class Server extends McpServer {
         );
         const text = JSON.stringify(result);
         if (this.maxResponseChars > 0 && text.length > this.maxResponseChars) {
+          const limit =
+            `${text.length} characters exceeds the ${this.maxResponseChars}-character limit ` +
+            '(MCP_MAX_RESPONSE_CHARS)';
+          if (options?.mutating) {
+            return {
+              isError: false,
+              content: [
+                {
+                  type: 'text' as const,
+                  text:
+                    `${name} completed successfully, but its response was omitted: ${limit}. ` +
+                    'Do not retry the operation. ' +
+                    (options.oversizeHint ?? 'Use the read tools to inspect the result.')
+                }
+              ]
+            };
+          }
           return {
             isError: true,
             content: [
               {
                 type: 'text' as const,
                 text:
-                  `${name} response too large to return: ${text.length} characters exceeds the ` +
-                  `${this.maxResponseChars}-character limit (MCP_MAX_RESPONSE_CHARS). ` +
-                  (oversizeHint ??
+                  `${name} response too large to return: ${limit}. ` +
+                  (options?.oversizeHint ??
                     "Narrow the query with the tool's filtering or pagination parameters and retry.")
               }
             ]

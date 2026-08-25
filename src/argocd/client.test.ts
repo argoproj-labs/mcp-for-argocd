@@ -212,6 +212,34 @@ test('getApplication: includeHistory / includeOperationState opt back in', async
   assert.equal(result.status?.operationState?.syncResult?.resources?.length, 1);
 });
 
+test('create/update/syncApplication return the same summary as getApplication', async (t) => {
+  // These write endpoints respond with the full Application — the same object
+  // get_application strips, and otherwise the largest payload a write could
+  // return. A successful write must never be the response that overflows the
+  // caller's context.
+  const urls = mockFetch(t, rawApp('watashi-app-us1'));
+  const client = new ArgoCDClient(BASE_URL, 'token');
+  const app = rawApp('watashi-app-us1') as Parameters<typeof client.createApplication>[0];
+
+  const results = [
+    await client.createApplication(app),
+    await client.updateApplication('watashi-app-us1', app),
+    await client.syncApplication('watashi-app-us1', { prune: true })
+  ];
+
+  assert.equal(urls.length, 3);
+  for (const result of results) {
+    const serialized = JSON.stringify(result);
+    assert.ok(!serialized.includes('managedFields'));
+    assert.ok(!serialized.includes('"history"'));
+    assert.ok(!serialized.includes('comparedTo'));
+    assert.ok(!serialized.includes('syncResult'));
+    // The operation verdict and the untouched spec survive, as for get_application.
+    assert.equal(result.status?.operationState?.phase, 'Succeeded');
+    assert.equal(result.spec?.source?.helm?.values, HELM_VALUES);
+  }
+});
+
 test('listClusters: strips config and info.apiVersions, keeps the summary', async (t) => {
   mockFetch(t, { items: [rawCluster('us1'), rawCluster('eu1')] });
   const client = new ArgoCDClient(BASE_URL, 'token');

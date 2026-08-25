@@ -258,7 +258,10 @@ By default, all the tools will be available.
 
 ### Response Size Limit
 
-Tool responses are serialized JSON and land directly in the calling model's context window. On large ArgoCD instances some responses can grow far beyond any context window (an unbounded application list on an instance with a few hundred applications can exceed 700k tokens), so the server enforces a size limit on every tool response: any response whose serialized form exceeds the limit is replaced with an error that names the tool's filtering/pagination parameters, letting the model narrow the query and retry instead of receiving (or truncating) an unusable payload.
+Tool responses are serialized JSON and land directly in the calling model's context window. On large ArgoCD instances some responses can grow far beyond any context window (an unbounded application list on an instance with a few hundred applications can exceed 700k tokens), so the server enforces a size limit on every tool response:
+
+- For **read tools**, an oversized response is replaced with an error that names the tool's filtering/pagination parameters, letting the model narrow the query and retry instead of receiving (or truncating) an unusable payload.
+- For **mutating tools** (`create_application`, `update_application`, `delete_application`, `sync_application`, `run_resource_action`), the operation has already completed by the time the limit is checked, so an oversized response is never reported as an error — it is replaced with a success notice that says not to retry and names the read tool to inspect the result with. (`create`/`update`/`sync` also return the same trimmed Application that `get_application` does, so in practice they stay well under the limit.)
 
 The limit defaults to 100,000 characters (roughly 25k tokens) and is configurable:
 

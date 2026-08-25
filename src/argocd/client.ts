@@ -32,6 +32,38 @@ const stripSource = (source?: V1alpha1ApplicationSource) =>
     name: source.name
   };
 
+// Reduce a full Application to its current state. The fields dropped here
+// dominate a raw Application payload without carrying current state:
+// managedFields is server bookkeeping, history and operationState replay past
+// syncs, and sync.comparedTo embeds a second full copy of the source (inline
+// Helm values included). spec is returned untouched. JSON serialization drops
+// the undefined keys.
+//
+// Applied to every tool that returns a single Application — get_application as
+// well as create/update/sync, whose responses are the same object and were
+// otherwise the largest payloads a write could produce.
+const summarizeApplication = (
+  body: V1alpha1Application,
+  options?: { includeHistory?: boolean; includeOperationState?: boolean }
+) => ({
+  ...body,
+  metadata: body.metadata && { ...body.metadata, managedFields: undefined },
+  status: body.status && {
+    ...body.status,
+    history: options?.includeHistory ? body.status.history : undefined,
+    operationState: options?.includeOperationState
+      ? body.status.operationState
+      : body.status.operationState && {
+          phase: body.status.operationState.phase,
+          message: body.status.operationState.message,
+          startedAt: body.status.operationState.startedAt,
+          finishedAt: body.status.operationState.finishedAt,
+          retryCount: body.status.operationState.retryCount
+        },
+    sync: body.status.sync && { ...body.status.sync, comparedTo: undefined }
+  }
+});
+
 export class ArgoCDClient {
   private baseUrl: string;
   private apiToken: string;
@@ -169,29 +201,7 @@ export class ArgoCDClient {
       queryParams
     );
 
-    // The fields dropped here dominate a raw Application payload without
-    // carrying current state: managedFields is server bookkeeping, history and
-    // operationState replay past syncs, and sync.comparedTo embeds a second
-    // full copy of the source (inline Helm values included). spec is returned
-    // untouched. JSON serialization drops the undefined keys.
-    return {
-      ...body,
-      metadata: body.metadata && { ...body.metadata, managedFields: undefined },
-      status: body.status && {
-        ...body.status,
-        history: options?.includeHistory ? body.status.history : undefined,
-        operationState: options?.includeOperationState
-          ? body.status.operationState
-          : body.status.operationState && {
-              phase: body.status.operationState.phase,
-              message: body.status.operationState.message,
-              startedAt: body.status.operationState.startedAt,
-              finishedAt: body.status.operationState.finishedAt,
-              retryCount: body.status.operationState.retryCount
-            },
-        sync: body.status.sync && { ...body.status.sync, comparedTo: undefined }
-      }
-    };
+    return summarizeApplication(body, options);
   }
 
   public async getAppProject(projectName: string) {
@@ -199,13 +209,16 @@ export class ArgoCDClient {
     return body;
   }
 
+  // create/update/sync respond with the full Application; return the same
+  // summary get_application does so a successful write can never be the
+  // payload that overflows the caller's context.
   public async createApplication(application: V1alpha1Application) {
     const { body } = await this.client.post<V1alpha1Application, V1alpha1Application>(
       `/api/v1/applications`,
       null,
       application
     );
-    return body;
+    return summarizeApplication(body);
   }
 
   public async updateApplication(applicationName: string, application: V1alpha1Application) {
@@ -214,7 +227,7 @@ export class ArgoCDClient {
       null,
       application
     );
-    return body;
+    return summarizeApplication(body);
   }
 
   public async deleteApplication(
@@ -277,7 +290,7 @@ export class ArgoCDClient {
       null,
       Object.keys(syncRequest).length > 0 ? syncRequest : undefined
     );
-    return body;
+    return summarizeApplication(body);
   }
 
   public async getApplicationResourceTree(applicationName: string, appNamespace?: string) {
