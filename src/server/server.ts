@@ -40,11 +40,17 @@ type ArgoCDArgs = {
   argocdBaseUrl?: string;
 };
 
+// Serialized tool responses larger than this are replaced with an error that
+// tells the model how to narrow the query, instead of flooding (or exceeding)
+// the client's context window. Override with MCP_MAX_RESPONSE_CHARS; 0 disables.
+const DEFAULT_MAX_RESPONSE_CHARS = 100_000;
+
 export class Server extends McpServer {
   private defaultBaseUrl: string;
   private defaultApiToken: string;
   private tokenRegistry: TokenRegistry;
   private argocdClient: ArgoCDClient;
+  private maxResponseChars: number;
   // Cache per-credential clients to avoid rebuilding the HttpClient on every
   // call. Keyed by baseUrl + token, since the same base URL may resolve to
   // different tokens (request token vs. registry token vs. default).
@@ -60,6 +66,13 @@ export class Server extends McpServer {
     this.tokenRegistry = serverInfo.tokenRegistry ?? tokenRegistryFromEnv();
     this.argocdClient = new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
 
+    const rawMaxChars = (process.env.MCP_MAX_RESPONSE_CHARS ?? '').trim();
+    const parsedMaxChars = rawMaxChars ? Number(rawMaxChars) : NaN;
+    this.maxResponseChars =
+      Number.isFinite(parsedMaxChars) && parsedMaxChars >= 0
+        ? parsedMaxChars
+        : DEFAULT_MAX_RESPONSE_CHARS;
+
     const isReadOnly =
       String(process.env.MCP_READ_ONLY ?? '')
         .trim()
@@ -68,13 +81,13 @@ export class Server extends McpServer {
     // Always register read/query tools
     this.addJsonOutputTool(
       'list_applications',
-      'list_applications returns list of applications',
+      'list_applications returns a paginated, summarized list of applications (at most `limit` per call, default 50). Response metadata carries totalItems/returnedItems/hasMore for paging; heavy fields such as inline Helm values are omitted — use get_application for full details of one application. For a count, call with limit=1 and read metadata.totalItems.',
       {
         search: z
           .string()
           .optional()
           .describe(
-            'Search applications by name. This is a partial match on the application name and does not support glob patterns (e.g. "*"). Optional.'
+            'Filter applications by name: case-insensitive partial match, applied after any server-side filters. Does not support glob patterns (e.g. "*"). Optional.'
           ),
         limit: z
           .number()
@@ -82,7 +95,7 @@ export class Server extends McpServer {
           .positive()
           .optional()
           .describe(
-            'Maximum number of applications to return. Use this to reduce token usage when there are many applications. Optional.'
+            'Maximum number of applications to return. Defaults to 50; check metadata.hasMore and page with offset if more exist. Optional.'
           ),
         offset: z
           .number()
@@ -91,18 +104,46 @@ export class Server extends McpServer {
           .optional()
           .describe(
             'Number of applications to skip before returning results. Use with limit for pagination. Optional.'
+          ),
+        projects: z
+          .array(z.string())
+          .optional()
+          .describe('Filter server-side to applications in these ArgoCD projects. Optional.'),
+        selector: z
+          .string()
+          .optional()
+          .describe(
+            'Filter server-side by Kubernetes label selector (e.g. "team=payments,env!=dev"). Optional.'
+          ),
+        repo: z
+          .string()
+          .optional()
+          .describe('Filter server-side by source repository URL. Optional.'),
+        detail: z
+          .enum(['name', 'summary'])
+          .optional()
+          .describe(
+            'Detail level per application. "summary" (default) returns stripped metadata/spec/status; "name" returns only name, namespace, project, sync status, and health status — use it for fleet-wide sweeps. Optional.'
           )
       },
-      async ({ search, limit, offset }, client) =>
+      async ({ search, limit, offset, projects, selector, repo, detail }, client) =>
         await client.listApplications({
           search: search ?? undefined,
           limit,
-          offset
-        })
+          offset,
+          projects,
+          selector,
+          repo,
+          detail
+        }),
+      {
+        oversizeHint:
+          'Narrow the query: lower `limit` (paging with `offset`), filter with `search`/`projects`/`selector`/`repo`, or set detail:"name" for a minimal fleet-wide listing.'
+      }
     );
     this.addJsonOutputTool(
       'list_clusters',
-      'list_clusters returns list of clusters registered with ArgoCD',
+      'list_clusters returns a summarized list of clusters registered with ArgoCD (name, server, connection state, app count, server version; connection config and supported API versions are omitted).',
       {
         server: z.string().optional().describe('Filter clusters by server URL. Optional.'),
         name: z.string().optional().describe('Filter clusters by name. Optional.')
@@ -115,13 +156,32 @@ export class Server extends McpServer {
     );
     this.addJsonOutputTool(
       'get_application',
-      'get_application returns application by application name. Optionally specify the application namespace to get applications from non-default namespaces.',
+      'get_application returns application by application name. Optionally specify the application namespace to get applications from non-default namespaces. Heavy status fields (managedFields, sync history, full operation state, sync.comparedTo) are omitted by default; set includeHistory/includeOperationState to fetch them.',
       {
         applicationName: z.string(),
-        applicationNamespace: ApplicationNamespaceSchema.optional()
+        applicationNamespace: ApplicationNamespaceSchema.optional(),
+        includeHistory: z
+          .boolean()
+          .optional()
+          .describe(
+            'Include status.history (past sync revisions). Adds significant size. Optional.'
+          ),
+        includeOperationState: z
+          .boolean()
+          .optional()
+          .describe(
+            'Include the full status.operationState (per-resource sync results) instead of the default phase/message summary. Adds significant size. Optional.'
+          )
       },
-      async ({ applicationName, applicationNamespace }, client) =>
-        await client.getApplication(applicationName, applicationNamespace)
+      async (
+        { applicationName, applicationNamespace, includeHistory, includeOperationState },
+        client
+      ) =>
+        await client.getApplication(applicationName, applicationNamespace, {
+          includeHistory,
+          includeOperationState
+        }),
+      'Retry without includeHistory/includeOperationState, or use get_application_resource_tree / get_application_managed_resources with filters for resource-level detail.'
     );
     this.addJsonOutputTool(
       'get_appproject',
@@ -178,7 +238,8 @@ export class Server extends McpServer {
           applicationName,
           Object.keys(filters).length > 0 ? filters : undefined
         );
-      }
+      },
+      'Filter by kind/namespace/name (or their combination) to reduce the payload.'
     );
     this.addJsonOutputTool(
       'get_application_workload_logs',
@@ -256,6 +317,10 @@ export class Server extends McpServer {
         return Promise.all(
           refs.map((ref) => client.getResource(applicationName, applicationNamespace, ref))
         );
+      },
+      {
+        oversizeHint:
+          'Pass specific resourceRefs (from get_application_resource_tree) instead of fetching every resource in the application.'
       }
     );
     this.addJsonOutputTool(
@@ -281,14 +346,22 @@ export class Server extends McpServer {
         'create_application creates a new ArgoCD application in the specified namespace. The application.metadata.namespace field determines where the Application resource will be created (e.g., "argocd", "argocd-apps", or any custom namespace).',
         { application: ApplicationSchema },
         async ({ application }, client) =>
-          await client.createApplication(application as V1alpha1Application)
+          await client.createApplication(application as V1alpha1Application),
+        {
+          mutating: true,
+          oversizeHint: 'Use get_application to inspect the created application.'
+        }
       );
       this.addJsonOutputTool(
         'update_application',
         'update_application updates application',
         { applicationName: z.string(), application: ApplicationSchema },
         async ({ applicationName, application }, client) =>
-          await client.updateApplication(applicationName, application as V1alpha1Application)
+          await client.updateApplication(applicationName, application as V1alpha1Application),
+        {
+          mutating: true,
+          oversizeHint: 'Use get_application to inspect the updated application.'
+        }
       );
       this.addJsonOutputTool(
         'delete_application',
@@ -317,7 +390,8 @@ export class Server extends McpServer {
             applicationName,
             Object.keys(options).length > 0 ? options : undefined
           );
-        }
+        },
+        { mutating: true }
       );
       this.addJsonOutputTool(
         'sync_application',
@@ -361,6 +435,10 @@ export class Server extends McpServer {
             applicationName,
             Object.keys(options).length > 0 ? options : undefined
           );
+        },
+        {
+          mutating: true,
+          oversizeHint: 'Use get_application to inspect the sync status.'
         }
       );
       this.addJsonOutputTool(
@@ -378,7 +456,11 @@ export class Server extends McpServer {
             applicationNamespace,
             resourceRef as V1alpha1ResourceResult,
             action
-          )
+          ),
+        {
+          mutating: true,
+          oversizeHint: 'Use get_application_resource_tree to inspect the affected resource.'
+        }
       );
     }
   }
@@ -445,6 +527,16 @@ export class Server extends McpServer {
     return client;
   }
 
+  // oversizeHint is appended to the size-guard message so the model knows how to
+  // proceed: for read tools, which parameters narrow the response; for mutating
+  // tools, how to inspect the result of an operation whose response was omitted.
+  //
+  // mutating marks tools whose callback changes ArgoCD state (create/update/
+  // delete/sync/run action). By the time the size guard runs, the operation has
+  // already happened, so an oversized response must never be reported as a tool
+  // error: a client that treats isError as failure would retry — repeating a
+  // sync, or failing a create with "already exists". Instead the payload is
+  // replaced with a success notice that says not to retry.
   private addJsonOutputTool<Args extends ZodRawShape, T>(
     name: string,
     description: string,
@@ -453,7 +545,8 @@ export class Server extends McpServer {
       cbArgs: Parameters<ToolCallback<Args>>[0],
       client: ArgoCDClient,
       extra: Parameters<ToolCallback<Args>>[1]
-    ) => T
+    ) => T,
+    options?: { oversizeHint?: string; mutating?: boolean }
   ) {
     const mergedSchema = { ...paramsSchema, ...argoCDArgsSchema } as ZodRawShape;
     this.tool(name, description, mergedSchema, async (...args) => {
@@ -471,9 +564,41 @@ export class Server extends McpServer {
           client,
           extra
         );
+        const text = JSON.stringify(result);
+        if (this.maxResponseChars > 0 && text.length > this.maxResponseChars) {
+          const limit =
+            `${text.length} characters exceeds the ${this.maxResponseChars}-character limit ` +
+            '(MCP_MAX_RESPONSE_CHARS)';
+          if (options?.mutating) {
+            return {
+              isError: false,
+              content: [
+                {
+                  type: 'text' as const,
+                  text:
+                    `${name} completed successfully, but its response was omitted: ${limit}. ` +
+                    'Do not retry the operation. ' +
+                    (options.oversizeHint ?? 'Use the read tools to inspect the result.')
+                }
+              ]
+            };
+          }
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text' as const,
+                text:
+                  `${name} response too large to return: ${limit}. ` +
+                  (options?.oversizeHint ??
+                    "Narrow the query with the tool's filtering or pagination parameters and retry.")
+              }
+            ]
+          };
+        }
         return {
           isError: false,
-          content: [{ type: 'text', text: JSON.stringify(result) }]
+          content: [{ type: 'text', text }]
         };
       } catch (error) {
         return {

@@ -2,6 +2,7 @@ import {
   ApplicationLogEntry,
   V1alpha1Application,
   V1alpha1ApplicationList,
+  V1alpha1ApplicationSource,
   V1alpha1ApplicationTree,
   V1EventList,
   V1alpha1ResourceAction,
@@ -12,6 +13,56 @@ import {
   V1alpha1AppProject
 } from '../types/argocd-types.js';
 import { HttpClient } from './http.js';
+
+// Applications returned by list_applications when no limit is given. ArgoCD's
+// list API has no server-side pagination, so this is the only bound between an
+// unwitting caller and the whole fleet in one response.
+const DEFAULT_LIST_LIMIT = 50;
+
+// Reduce an ApplicationSource to the fields that identify it. Inline Helm
+// values (helm.values / helm.valuesObject) routinely dominate list payloads;
+// get_application returns them.
+const stripSource = (source?: V1alpha1ApplicationSource) =>
+  source && {
+    repoURL: source.repoURL,
+    path: source.path,
+    chart: source.chart,
+    targetRevision: source.targetRevision,
+    ref: source.ref,
+    name: source.name
+  };
+
+// Reduce a full Application to its current state. The fields dropped here
+// dominate a raw Application payload without carrying current state:
+// managedFields is server bookkeeping, history and operationState replay past
+// syncs, and sync.comparedTo embeds a second full copy of the source (inline
+// Helm values included). spec is returned untouched. JSON serialization drops
+// the undefined keys.
+//
+// Applied to every tool that returns a single Application — get_application as
+// well as create/update/sync, whose responses are the same object and were
+// otherwise the largest payloads a write could produce.
+const summarizeApplication = (
+  body: V1alpha1Application,
+  options?: { includeHistory?: boolean; includeOperationState?: boolean }
+) => ({
+  ...body,
+  metadata: body.metadata && { ...body.metadata, managedFields: undefined },
+  status: body.status && {
+    ...body.status,
+    history: options?.includeHistory ? body.status.history : undefined,
+    operationState: options?.includeOperationState
+      ? body.status.operationState
+      : body.status.operationState && {
+          phase: body.status.operationState.phase,
+          message: body.status.operationState.message,
+          startedAt: body.status.operationState.startedAt,
+          finishedAt: body.status.operationState.finishedAt,
+          retryCount: body.status.operationState.retryCount
+        },
+    sync: body.status.sync && { ...body.status.sync, comparedTo: undefined }
+  }
+});
 
 export class ArgoCDClient {
   private baseUrl: string;
@@ -24,36 +75,75 @@ export class ArgoCDClient {
     this.client = new HttpClient(this.baseUrl, this.apiToken);
   }
 
-  public async listApplications(params?: { search?: string; limit?: number; offset?: number }) {
+  public async listApplications(params?: {
+    search?: string;
+    limit?: number;
+    offset?: number;
+    projects?: string[];
+    selector?: string;
+    repo?: string;
+    detail?: 'name' | 'summary';
+  }) {
+    // Only filters ArgoCD's ApplicationQuery actually supports are sent
+    // upstream. `search` is not one of them — the gRPC gateway silently drops
+    // unknown params and returns everything — so it is applied client-side.
+    const queryParams: Record<string, string | string[]> = {};
+    if (params?.projects?.length) queryParams.projects = params.projects;
+    if (params?.selector) queryParams.selector = params.selector;
+    if (params?.repo) queryParams.repo = params.repo;
+
     const { body } = await this.client.get<V1alpha1ApplicationList>(
       `/api/v1/applications`,
-      params?.search ? { search: params.search } : undefined
+      Object.keys(queryParams).length > 0 ? queryParams : undefined
     );
 
-    // Strip heavy fields to reduce token usage
-    const strippedItems =
-      body.items?.map((app) => ({
-        metadata: {
-          name: app.metadata?.name,
-          namespace: app.metadata?.namespace,
-          labels: app.metadata?.labels,
-          creationTimestamp: app.metadata?.creationTimestamp
-        },
-        spec: {
-          project: app.spec?.project,
-          source: app.spec?.source,
-          destination: app.spec?.destination
-        },
-        status: {
-          sync: app.status?.sync,
-          health: app.status?.health,
-          summary: app.status?.summary
-        }
-      })) ?? [];
+    let matched = body.items ?? [];
+    if (params?.search) {
+      const needle = params.search.toLowerCase();
+      matched = matched.filter((app) => app.metadata?.name?.toLowerCase().includes(needle));
+    }
 
-    // Apply pagination
+    // Strip heavy fields to reduce token usage. status.sync is reduced to its
+    // verdict: comparedTo embeds a second full copy of the source (inline Helm
+    // values included).
+    const strippedItems = matched.map((app) =>
+      params?.detail === 'name'
+        ? {
+            name: app.metadata?.name,
+            namespace: app.metadata?.namespace,
+            project: app.spec?.project,
+            syncStatus: app.status?.sync?.status,
+            healthStatus: app.status?.health?.status
+          }
+        : {
+            metadata: {
+              name: app.metadata?.name,
+              namespace: app.metadata?.namespace,
+              labels: app.metadata?.labels,
+              creationTimestamp: app.metadata?.creationTimestamp
+            },
+            spec: {
+              project: app.spec?.project,
+              source: stripSource(app.spec?.source),
+              sources: app.spec?.sources?.map((source) => stripSource(source)),
+              destination: app.spec?.destination
+            },
+            status: {
+              sync: app.status?.sync && {
+                status: app.status.sync.status,
+                revision: app.status.sync.revision,
+                revisions: app.status.sync.revisions
+              },
+              health: app.status?.health,
+              summary: app.status?.summary
+            }
+          }
+    );
+
+    // Apply pagination. totalItems counts applications after filtering (search/
+    // projects/selector/repo), not the whole instance.
     const start = params?.offset ?? 0;
-    const end = params?.limit ? start + params.limit : strippedItems.length;
+    const end = start + (params?.limit ?? DEFAULT_LIST_LIMIT);
     const items = strippedItems.slice(start, end);
 
     return {
@@ -77,16 +167,41 @@ export class ArgoCDClient {
       Object.keys(queryParams).length > 0 ? queryParams : undefined
     );
 
-    return body;
+    // info.apiVersions alone can be >90% of the raw payload; config carries
+    // connection/TLS material. Neither belongs in a listing.
+    const items =
+      body.items?.map((cluster) => ({
+        name: cluster.name,
+        server: cluster.server,
+        labels: cluster.labels,
+        annotations: cluster.annotations,
+        namespaces: cluster.namespaces,
+        project: cluster.project,
+        clusterResources: cluster.clusterResources,
+        connectionState: cluster.connectionState,
+        info: cluster.info && {
+          applicationsCount: cluster.info.applicationsCount,
+          serverVersion: cluster.info.serverVersion,
+          connectionState: cluster.info.connectionState,
+          cacheInfo: cluster.info.cacheInfo
+        }
+      })) ?? [];
+
+    return { items, metadata: body.metadata };
   }
 
-  public async getApplication(applicationName: string, appNamespace?: string) {
+  public async getApplication(
+    applicationName: string,
+    appNamespace?: string,
+    options?: { includeHistory?: boolean; includeOperationState?: boolean }
+  ) {
     const queryParams = appNamespace ? { appNamespace } : undefined;
     const { body } = await this.client.get<V1alpha1Application>(
       `/api/v1/applications/${applicationName}`,
       queryParams
     );
-    return body;
+
+    return summarizeApplication(body, options);
   }
 
   public async getAppProject(projectName: string) {
@@ -94,13 +209,16 @@ export class ArgoCDClient {
     return body;
   }
 
+  // create/update/sync respond with the full Application; return the same
+  // summary get_application does so a successful write can never be the
+  // payload that overflows the caller's context.
   public async createApplication(application: V1alpha1Application) {
     const { body } = await this.client.post<V1alpha1Application, V1alpha1Application>(
       `/api/v1/applications`,
       null,
       application
     );
-    return body;
+    return summarizeApplication(body);
   }
 
   public async updateApplication(applicationName: string, application: V1alpha1Application) {
@@ -109,7 +227,7 @@ export class ArgoCDClient {
       null,
       application
     );
-    return body;
+    return summarizeApplication(body);
   }
 
   public async deleteApplication(
@@ -172,7 +290,7 @@ export class ArgoCDClient {
       null,
       Object.keys(syncRequest).length > 0 ? syncRequest : undefined
     );
-    return body;
+    return summarizeApplication(body);
   }
 
   public async getApplicationResourceTree(applicationName: string, appNamespace?: string) {

@@ -4,6 +4,7 @@
 // Export types you need from the argocd.d.ts file for use in your project
 export type ApplicationLogEntry = ArgoCD.ApplicationLogEntry;
 export type V1alpha1Application = ArgoCD.V1alpha1Application;
+export type V1alpha1ApplicationSource = ArgoCD.V1alpha1ApplicationSource;
 export type V1alpha1ApplicationList = ArgoCD.V1alpha1ApplicationList;
 export type V1alpha1ApplicationTree = ArgoCD.V1alpha1ApplicationTree;
 export type V1EventList = ArgoCD.V1EventList;

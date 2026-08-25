@@ -4,7 +4,9 @@ export interface HttpResponse<T> {
   body: T;
 }
 
-type SearchParams = Record<string, string | number | boolean | undefined | null> | null;
+// Array values are serialized as repeated query params (e.g. projects=a&projects=b),
+// matching how the ArgoCD gRPC gateway encodes repeated proto fields.
+type SearchParams = Record<string, string | number | boolean | string[] | undefined | null> | null;
 
 export class HttpClient {
   public readonly baseUrl: string;
@@ -28,7 +30,11 @@ export class HttpClient {
     const urlObject = this.absUrl(url);
     if (params) {
       Object.entries(params).forEach(([key, value]) => {
-        urlObject.searchParams.set(key, value?.toString() || '');
+        if (Array.isArray(value)) {
+          value.forEach((v) => urlObject.searchParams.append(key, v));
+        } else {
+          urlObject.searchParams.set(key, value?.toString() || '');
+        }
       });
     }
     const response = await fetch(urlObject, {
@@ -52,7 +58,11 @@ export class HttpClient {
     const urlObject = this.absUrl(url);
     if (params) {
       Object.entries(params).forEach(([key, value]) => {
-        urlObject.searchParams.set(key, value?.toString() || '');
+        if (Array.isArray(value)) {
+          value.forEach((v) => urlObject.searchParams.append(key, v));
+        } else {
+          urlObject.searchParams.set(key, value?.toString() || '');
+        }
       });
     }
     const response = await fetch(urlObject, {

@@ -38,14 +38,14 @@ const urlForGithub = `https://insiders.vscode.dev/redirect?url=${encodeURICompon
 The server provides the following ArgoCD management tools:
 
 ### Cluster Management
-- `list_clusters`: List all clusters registered with ArgoCD
+- `list_clusters`: List all clusters registered with ArgoCD, summarized (name, server, connection state, app count, server version; connection `config` and `info.apiVersions` are omitted)
 
 ### Project Management
 - `get_appproject`: Get detailed information about a specific AppProject (project)
 
 ### Application Management
-- `list_applications`: List and filter all applications
-- `get_application`: Get detailed information about a specific application
+- `list_applications`: List applications, paginated (default `limit` 50) and summarized. Filter server-side by `projects`, label `selector`, or `repo`, and client-side by `search` (case-insensitive partial name match). `detail: "name"` returns a minimal name/project/sync/health listing for fleet-wide sweeps; response `metadata.totalItems` gives the count without fetching the list
+- `get_application`: Get detailed information about a specific application. Heavy status fields (`managedFields`, sync `history`, full `operationState`, `sync.comparedTo`) are omitted unless requested via `includeHistory` / `includeOperationState`
 - `create_application`: Create a new application
 - `update_application`: Update an existing application
 - `delete_application`: Delete an application
@@ -312,6 +312,21 @@ This will disable the following tools:
 - `run_resource_action`
 
 By default, all the tools will be available.
+
+### Response Size Limit
+
+Tool responses are serialized JSON and land directly in the calling model's context window. On large ArgoCD instances some responses can grow far beyond any context window (an unbounded application list on an instance with a few hundred applications can exceed 700k tokens), so the server enforces a size limit on every tool response:
+
+- For **read tools**, an oversized response is replaced with an error that names the tool's filtering/pagination parameters, letting the model narrow the query and retry instead of receiving (or truncating) an unusable payload.
+- For **mutating tools** (`create_application`, `update_application`, `delete_application`, `sync_application`, `run_resource_action`), the operation has already completed by the time the limit is checked, so an oversized response is never reported as an error — it is replaced with a success notice that says not to retry and names the read tool to inspect the result with. (`create`/`update`/`sync` also return the same trimmed Application that `get_application` does, so in practice they stay well under the limit.)
+
+The limit defaults to 100,000 characters (roughly 25k tokens) and is configurable:
+
+```
+"MCP_MAX_RESPONSE_CHARS": "200000"
+```
+
+Set it to `0` to disable the guard entirely.
 
 ### Stateless Mode
 
