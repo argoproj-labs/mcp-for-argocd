@@ -108,13 +108,29 @@ export const cmd = () => {
     'http',
     'Start ArgoCD MCP server using Http Stream.',
     (yargs) =>
-      listenerOptions(yargs).option('stateless', {
-        type: 'boolean',
-        default: false,
-        description: 'Run in stateless mode'
-      }),
+      listenerOptions(yargs)
+        .option('stateless', {
+          type: 'boolean',
+          default: false,
+          description: 'Run in stateless mode'
+        })
+        .option('json-response', {
+          type: 'boolean',
+          default: false,
+          description:
+            'Return a single JSON response instead of upgrading to an SSE stream. ' +
+            'Independent of --stateless: a stateless deployment gains nothing from an SSE ' +
+            "stream's resumability, and some MCP clients treat a stateless server's " +
+            'end-of-stream as a connection failure when no SSE session/event ID is present.'
+        }),
     (argv) =>
-      start(() => connectHttpTransport({ ...transportOptions(argv), stateless: argv.stateless }))
+      start(() =>
+        connectHttpTransport({
+          ...transportOptions(argv),
+          stateless: argv.stateless,
+          jsonResponse: argv.jsonResponse
+        })
+      )
   );
 
   // Without strict(), a misspelled security flag ('--allowed-host') is silently
