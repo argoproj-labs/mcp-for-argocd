@@ -341,6 +341,18 @@ In stateless mode:
 
 This mode is recommended for Kubernetes deployments with Horizontal Pod Autoscaling (HPA) where network-level sticky sessions are not available.
 
+### JSON Response Mode
+
+By default, the HTTP transport upgrades every tool-call response to a Server-Sent Events (SSE) stream. Some MCP clients treat the end of that stream as a connection failure unless the server also sent a resumable SSE event ID on it — which a `--stateless` server never does, since it keeps no event store to resume from. This shows up client-side as an error such as `SSE stream ended without a response`.
+
+To make the server return a single JSON body instead of an SSE stream, start it with the `--json-response` flag:
+
+```bash
+node dist/index.js http --stateless --json-response
+```
+
+`--json-response` is independent of `--stateless` and can be combined with either mode. It's most useful together with `--stateless`, since a stateless deployment gains nothing from SSE's resumability in the first place.
+
 ## For Development
 
 1. Clone the repository:

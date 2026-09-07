@@ -200,6 +200,77 @@ const rawRequest = (port: number, payload: string): Promise<string> =>
     socket.on('error', reject);
   });
 
+// Unlike the other tests in this file, this one needs a real initialize response
+// (not just to reach the credential check), so it supplies a token and lets the
+// request through to the SDK's own handling. initialize is a pure protocol
+// handshake and never reaches out to ArgoCD, so a fake token is sufficient.
+const requestWithHeaders = (
+  port: number,
+  headers: Record<string, string>
+): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> =>
+  new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port, path: '/mcp', method: 'POST', headers },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk) => (body += chunk));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body }));
+      }
+    );
+    req.on('error', reject);
+    req.end(initialize);
+  });
+
+test('--json-response returns a JSON body instead of an SSE stream on initialize', async () => {
+  const port = await freePort();
+  const previousToken = process.env.ARGOCD_API_TOKEN;
+  process.env.ARGOCD_API_TOKEN = 'fake-token';
+  const server = connectHttpTransport({
+    port,
+    authToken: INBOUND_TOKEN,
+    stateless: true,
+    jsonResponse: true
+  });
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const res = await requestWithHeaders(port, {
+      ...authorized(port),
+      accept: 'application/json, text/event-stream'
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.headers['content-type'] ?? '', /^application\/json/);
+    assert.doesNotMatch(res.headers['content-type'] ?? '', /event-stream/);
+    // The body itself is a complete JSON-RPC response, not an SSE `data: ` frame.
+    const parsed = JSON.parse(res.body);
+    assert.equal(parsed.jsonrpc, '2.0');
+    assert.equal(parsed.id, 1);
+  } finally {
+    if (previousToken !== undefined) process.env.ARGOCD_API_TOKEN = previousToken;
+    else delete process.env.ARGOCD_API_TOKEN;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('without --json-response, initialize is upgraded to an SSE stream by default', async () => {
+  const port = await freePort();
+  const previousToken = process.env.ARGOCD_API_TOKEN;
+  process.env.ARGOCD_API_TOKEN = 'fake-token';
+  const server = connectHttpTransport({ port, authToken: INBOUND_TOKEN, stateless: true });
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const res = await requestWithHeaders(port, {
+      ...authorized(port),
+      accept: 'application/json, text/event-stream'
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.headers['content-type'] ?? '', /^text\/event-stream/);
+  } finally {
+    if (previousToken !== undefined) process.env.ARGOCD_API_TOKEN = previousToken;
+    else delete process.env.ARGOCD_API_TOKEN;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test('an absent or empty Host header is rejected, not treated as an allowed name', async () => {
   const { port, close } = await startTransport(connectHttpTransport);
   try {
