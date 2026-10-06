@@ -1,3 +1,107 @@
+import { readFileSync } from 'node:fs';
+import { rootCertificates } from 'node:tls';
+import {
+  Agent,
+  Dispatcher,
+  EnvHttpProxyAgent,
+  fetch as undiciFetch,
+  type RequestInit as UndiciRequestInit
+} from 'undici';
+
+// Mirrors the argocd CLI flags --client-crt, --client-crt-key, --server-crt, --insecure.
+export interface TlsOptions {
+  clientCrt?: string;
+  clientCrtKey?: string;
+  serverCrt?: string;
+  insecure?: boolean;
+}
+
+// Node's fetch only honours HTTP(S)_PROXY with NODE_USE_ENV_PROXY=1 / --use-env-proxy;
+// do the same so TLS options don't turn a proxied connection into a direct one.
+const useEnvProxy =
+  process.env.NODE_USE_ENV_PROXY === '1' || process.execArgv.includes('--use-env-proxy');
+
+const newAgent = (tls?: Agent.Options['connect']): Dispatcher =>
+  useEnvProxy
+    ? new EnvHttpProxyAgent({ connect: tls, requestTls: tls } as EnvHttpProxyAgent.Options)
+    : new Agent({ connect: tls });
+
+// TLS settings are bound to operator-configured origins (ARGOCD_BASE_URL and registry
+// entries), so one instance's client cert or --insecure never applies to another.
+const agentsByOrigin = new Map<string, Dispatcher>();
+const tlsHostnames = new Set<string>();
+const optionsByOrigin = new Map<string, string>();
+
+export const configureTls = (
+  baseUrl: string | undefined,
+  { clientCrt, clientCrtKey, serverCrt, insecure }: TlsOptions
+) => {
+  if (!clientCrt && !clientCrtKey && !serverCrt && !insecure) return;
+  if (!clientCrt !== !clientCrtKey) {
+    throw new Error('--client-crt and --client-crt-key must be set together');
+  }
+  if (!baseUrl) {
+    throw new Error('TLS options need a base URL to bind to: set ARGOCD_BASE_URL');
+  }
+  const url = new URL(baseUrl);
+  if (url.protocol !== 'https:') {
+    throw new Error(`TLS options for ${url.origin} need an https:// base URL`);
+  }
+  // Several registry entries (or the CLI flags) may share an origin: fine if they agree.
+  const options = JSON.stringify([clientCrt, clientCrtKey, serverCrt, !!insecure]);
+  const existing = optionsByOrigin.get(url.origin);
+  if (existing === options) return;
+  if (existing) {
+    throw new Error(`Conflicting TLS options configured for ${url.origin}`);
+  }
+  optionsByOrigin.set(url.origin, options);
+  agentsByOrigin.set(
+    url.origin,
+    newAgent({
+      cert: clientCrt ? readFileSync(clientCrt) : undefined,
+      key: clientCrtKey ? readFileSync(clientCrtKey) : undefined,
+      // Like the argocd CLI, --server-crt is appended to the default roots.
+      // ponytail: bundled roots only; NODE_EXTRA_CA_CERTS / --use-system-ca are not merged in.
+      ca: serverCrt ? [...rootCertificates, readFileSync(serverCrt, 'utf8')] : undefined,
+      rejectUnauthorized: !insecure
+    })
+  );
+  tlsHostnames.add(url.hostname);
+};
+
+// A typo'd http:// URL for a TLS-configured host would skip the handshake and send
+// the bearer token in cleartext.
+const assertTlsScheme = (url: URL) => {
+  if (url.protocol === 'http:' && tlsHostnames.has(url.hostname)) {
+    throw new Error(`Refusing http:// request to ${url.host}: TLS options are configured for it`);
+  }
+};
+
+// Picks the dispatcher per origin on every hop, so redirects are checked again.
+class OriginRouter extends Dispatcher {
+  private fallback = newAgent();
+
+  dispatch(opts: Dispatcher.DispatchOptions, handler: Dispatcher.DispatchHandlers): boolean {
+    const url = new URL(String(opts.origin));
+    assertTlsScheme(url);
+    return (agentsByOrigin.get(url.origin) ?? this.fallback).dispatch(opts, handler);
+  }
+}
+
+let router: OriginRouter | undefined;
+
+// undici's own fetch when TLS is configured: Node's bundled undici may not accept
+// a dispatcher from a different undici version.
+const doFetch = (url: URL, init: RequestInit): Promise<Response> => {
+  if (agentsByOrigin.size === 0) return fetch(url, init);
+  assertTlsScheme(url);
+  router ??= new OriginRouter();
+  return undiciFetch(url, {
+    ...(init as UndiciRequestInit),
+    dispatcher: router
+  }) as unknown as Promise<Response>;
+};
+
 export interface HttpResponse<T> {
   status: number;
   headers: Headers;
@@ -31,7 +135,7 @@ export class HttpClient {
         urlObject.searchParams.set(key, value?.toString() || '');
       });
     }
-    const response = await fetch(urlObject, {
+    const response = await doFetch(urlObject, {
       ...init,
       headers: { ...init?.headers, ...this.headers }
     });
@@ -55,7 +159,7 @@ export class HttpClient {
         urlObject.searchParams.set(key, value?.toString() || '');
       });
     }
-    const response = await fetch(urlObject, {
+    const response = await doFetch(urlObject, {
       ...init,
       headers: { ...init?.headers, ...this.headers }
     });

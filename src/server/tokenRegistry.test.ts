@@ -132,3 +132,11 @@ test('tokenRegistryFromEnv throws (fail closed) when the configured file is malf
     cleanup();
   }
 });
+
+test('a non-boolean insecure fails closed', () => {
+  assert.throws(
+    () =>
+      parseTokenRegistry(JSON.stringify([{ baseUrl: 'https://a', token: 't', insecure: 'false' }])),
+    /insecure must be a boolean/
+  );
+});
