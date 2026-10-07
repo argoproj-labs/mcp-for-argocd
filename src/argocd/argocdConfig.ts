@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, renameSync, chmodSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -76,17 +76,8 @@ export const updateTokensInConfig = (
   const configPath = getConfigPath();
   const tmp = `${configPath}.${randomBytes(4).toString('hex')}.tmp`;
   try {
-    // renameSync подменяет inode целиком, поэтому режим целевого файла НЕ наследуется —
-    // без этого конфиг получал 0666 & ~umask (обычно 0644) и argocd CLI ругался на
-    // слишком открытые права. Сохраняем режим существующего файла, по умолчанию 0600.
-    let mode = 0o600;
-    try {
-      mode = statSync(configPath).mode & 0o777;
-    } catch {
-      /* нового файла ещё нет */
-    }
-    writeFileSync(tmp, dump(config), { encoding: 'utf8', mode });
-    chmodSync(tmp, mode); // writeFileSync пропускает mode через umask, chmod — нет
+    writeFileSync(tmp, dump(config), { encoding: 'utf8', mode: 0o600 });
+    chmodSync(tmp, 0o600);
     renameSync(tmp, configPath);
   } catch (err) {
     try { renameSync(tmp, `${tmp}.failed`); } catch { /* ignore */ }
