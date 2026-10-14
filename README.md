@@ -46,6 +46,7 @@ The server provides the following ArgoCD management tools:
 ### Application Management
 - `list_applications`: List and filter all applications
 - `get_application`: Get detailed information about a specific application
+- `get_application_events`: Get events for a specific application
 - `create_application`: Create a new application
 - `update_application`: Update an existing application
 - `delete_application`: Delete an application
@@ -54,6 +55,7 @@ The server provides the following ArgoCD management tools:
 ### Resource Management
 - `get_application_resource_tree`: Get the resource tree for a specific application
 - `get_application_managed_resources`: Get managed resources for a specific application
+- `get_resources`: Get manifests for resources managed by an application
 - `get_application_workload_logs`: Get logs for application workloads (Pods, Deployments, etc.)
 - `get_resource_events`: Get events for resources managed by an application
 - `get_resource_actions`: Get available actions for resources
