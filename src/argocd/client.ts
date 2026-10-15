@@ -9,7 +9,8 @@ import {
   V1alpha1ResourceResult,
   V1alpha1ApplicationResourceResult,
   V1alpha1ClusterList,
-  V1alpha1AppProject
+  V1alpha1AppProject,
+  V1alpha1SyncOperationResource
 } from '../types/argocd-types.js';
 import { HttpClient } from './http.js';
 
@@ -147,9 +148,13 @@ export class ArgoCDClient {
       prune?: boolean;
       revision?: string;
       syncOptions?: string[];
+      resources?: V1alpha1SyncOperationResource[];
     }
   ) {
-    const syncRequest: Record<string, string | boolean | string[]> = {};
+    const syncRequest: Record<
+      string,
+      string | boolean | string[] | V1alpha1SyncOperationResource[]
+    > = {};
 
     if (options?.appNamespace) {
       syncRequest.appNamespace = options.appNamespace;
@@ -165,6 +170,9 @@ export class ArgoCDClient {
     }
     if (options?.syncOptions) {
       syncRequest.syncOptions = options.syncOptions;
+    }
+    if (options?.resources) {
+      syncRequest.resources = options.resources;
     }
 
     const { body } = await this.client.post<V1alpha1Application, V1alpha1Application>(
