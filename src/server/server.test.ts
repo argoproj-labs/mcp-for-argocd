@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from './server.js';
 import { TokenRegistry } from './tokenRegistry.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 // These tests exercise the per-call token-resolution boundary in resolveClient
 // via the registered tool handlers. The security-critical invariant is:
@@ -174,4 +176,93 @@ test('with no default token, an overridden URL still resolves only from the regi
   const result = await callTool(server, 'list_applications', { argocdBaseUrl: EVIL_BASE_URL });
   assert.equal(result.isError, true);
   assert.match(textOf(result), /Missing required ArgoCD API token/);
+});
+
+test('selective sync preserves resource namespaces and options through the MCP schema and HTTP client', async (t) => {
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry()
+  });
+  const client = new Client({ name: 'selective-sync-test', version: '1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const requests: { url: string; init?: RequestInit }[] = [];
+  t.mock.method(globalThis, 'fetch', async (url: URL, init?: RequestInit) => {
+    requests.push({ url: String(url), init });
+    return Response.json({ metadata: { name: 'example' } });
+  });
+  const resources = [
+    { group: '', kind: 'Service', name: 'database', namespace: 'runtime' },
+    {
+      group: 'monitoring.coreos.com',
+      kind: 'ServiceMonitor',
+      name: 'database',
+      namespace: 'observability'
+    },
+    { group: 'apiextensions.k8s.io', kind: 'CustomResourceDefinition', name: 'examples.test' }
+  ];
+  const options = {
+    applicationName: 'example',
+    applicationNamespace: 'argocd-apps',
+    resources,
+    dryRun: true,
+    prune: false,
+    revision: 'reviewed-revision',
+    syncOptions: ['ServerSideApply=true']
+  };
+  try {
+    const result = await client.callTool({ name: 'sync_application', arguments: options });
+    assert.notEqual(result.isError, true);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, `${DEFAULT_BASE_URL}/api/v1/applications/example/sync`);
+    assert.equal(requests[0].init?.method, 'POST');
+    assert.equal(
+      (requests[0].init?.headers as Record<string, string>).Authorization,
+      `Bearer ${DEFAULT_TOKEN}`
+    );
+    assert.deepEqual(JSON.parse(requests[0].init?.body as string), {
+      appNamespace: 'argocd-apps',
+      resources,
+      dryRun: true,
+      prune: false,
+      revision: 'reviewed-revision',
+      syncOptions: ['ServerSideApply=true']
+    });
+
+    // An invalid explicit selection must never degrade into a full-application sync.
+    for (const invalid of [
+      [],
+      [{}],
+      [{ kind: 'Service', name: '' }],
+      [{ kind: 'Service', name: 'database', namespace: '' }],
+      [{ kind: 'Service', name: 'database', namesapce: 'runtime' }],
+      'Service:database'
+    ]) {
+      const rejected = await client.callTool({
+        name: 'sync_application',
+        arguments: { ...options, resources: invalid }
+      });
+      assert.equal(rejected.isError, true);
+      assert.equal(requests.length, 1);
+    }
+    const unauthorized = await client.callTool({
+      name: 'sync_application',
+      arguments: { ...options, argocdBaseUrl: EVIL_BASE_URL }
+    });
+    assert.equal(unauthorized.isError, true);
+    assert.equal(requests.length, 1);
+
+    // Existing callers may still omit selection and retain explicit false options.
+    await client.callTool({
+      name: 'sync_application',
+      arguments: { applicationName: 'example', dryRun: false, prune: false }
+    });
+    assert.equal(requests.length, 2);
+    assert.deepEqual(JSON.parse(requests[1].init?.body as string), { dryRun: false, prune: false });
+  } finally {
+    await client.close();
+    await server.close();
+  }
 });

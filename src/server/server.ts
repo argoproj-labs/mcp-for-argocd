@@ -339,6 +339,22 @@ export class Server extends McpServer {
             .string()
             .optional()
             .describe('Sync to a specific revision instead of the latest'),
+          resources: z
+            .array(
+              z
+                .object({
+                  group: z.string().optional(),
+                  kind: z.string().min(1),
+                  name: z.string().min(1),
+                  namespace: z.string().min(1).optional()
+                })
+                .strict()
+            )
+            .min(1)
+            .optional()
+            .describe(
+              'Sync only these resources. Omit for a full-application sync. Use an empty group for core resources; namespace selects the resource namespace, not the Application namespace.'
+            ),
           syncOptions: z
             .array(z.string())
             .optional()
@@ -347,15 +363,24 @@ export class Server extends McpServer {
             )
         },
         async (
-          { applicationName, applicationNamespace, dryRun, prune, revision, syncOptions },
+          {
+            applicationName,
+            applicationNamespace,
+            dryRun,
+            prune,
+            revision,
+            syncOptions,
+            resources
+          },
           client
         ) => {
-          const options: Record<string, string | boolean | string[]> = {};
+          const options: NonNullable<Parameters<ArgoCDClient['syncApplication']>[1]> = {};
           if (applicationNamespace) options.appNamespace = applicationNamespace;
           if (dryRun !== undefined) options.dryRun = dryRun;
           if (prune !== undefined) options.prune = prune;
           if (revision) options.revision = revision;
           if (syncOptions) options.syncOptions = syncOptions;
+          if (resources) options.resources = resources;
 
           return await client.syncApplication(
             applicationName,
