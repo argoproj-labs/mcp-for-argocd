@@ -115,6 +115,34 @@ export class HttpClient {
     return response;
   }
 
+  // Unlike the other verbs, this checks response.ok and throws. Argo CD returns a
+  // RuntimeError body on failure, which the shared request() would cast to the
+  // success type and hand back as if it had worked — for a write, and especially
+  // for a failed RFC 6902 `test` op, the caller must see the failure. The response
+  // text goes in the message because that is where Argo CD puts the detail.
+  async patch<T, R>(url: string, params?: SearchParams, body?: T): Promise<HttpResponse<R>> {
+    const urlObject = this.absUrl(url);
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        urlObject.searchParams.set(key, value?.toString() || '');
+      });
+    }
+    const response = await fetch(urlObject, {
+      method: 'PATCH',
+      body: body ? JSON.stringify(body) : undefined,
+      headers: this.headers
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`ArgoCD PATCH ${url} failed with status ${response.status}: ${text}`);
+    }
+    return {
+      status: response.status,
+      headers: response.headers,
+      body: (text ? JSON.parse(text) : undefined) as R
+    };
+  }
+
   async delete<R>(url: string, params?: SearchParams): Promise<HttpResponse<R>> {
     const response = await this.request<R>(url, params, {
       method: 'DELETE'
