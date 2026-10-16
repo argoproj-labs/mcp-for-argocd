@@ -9,14 +9,24 @@ import {
   ApplicationSchema,
   ResourceRefSchema
 } from '../shared/models/schema.js';
-import { TokenRegistry, tokenRegistryFromEnv } from './tokenRegistry.js';
+import { TokenRegistry } from './tokenRegistry.js';
+import type { ProfileRegistrySource } from '../argocd/localConfig.js';
 
 type ServerInfo = {
   argocdBaseUrl: string;
   argocdApiToken: string;
-  // Optional registry mapping additional ArgoCD base URLs to their tokens. When
-  // omitted, it is loaded from the ARGOCD_TOKEN_REGISTRY_PATH env var.
+  // Registry of profiles + per-base-URL tokens, built from the user's Argo CD
+  // CLI config (see argocd/localConfig.ts). Defaults to an empty registry.
   tokenRegistry?: TokenRegistry;
+  // A live source for the registry that re-reads the config file on demand, so
+  // profiles added while the server runs are picked up. When omitted, the
+  // static tokenRegistry above is used (it never reloads). Takes precedence over
+  // tokenRegistry when both are given.
+  registrySource?: ProfileRegistrySource;
+  // Whether the server is running on the stateless HTTP transport, where a
+  // fresh Server is built per request. Used to warn that set_profile changes do
+  // not persist across requests in that mode.
+  stateless?: boolean;
 };
 
 // Per-call argument that any tool may accept to target a specific ArgoCD
@@ -43,12 +53,17 @@ type ArgoCDArgs = {
 export class Server extends McpServer {
   private defaultBaseUrl: string;
   private defaultApiToken: string;
-  private tokenRegistry: TokenRegistry;
+  private registrySource: ProfileRegistrySource;
   private argocdClient: ArgoCDClient;
   // Cache per-credential clients to avoid rebuilding the HttpClient on every
   // call. Keyed by baseUrl + token, since the same base URL may resolve to
   // different tokens (request token vs. registry token vs. default).
   private clientCache = new Map<string, ArgoCDClient>();
+  // The profile selected for this session (via set_profile, or the registry's
+  // default profile at startup). When set, tool calls that don't override the
+  // base URL target this profile's instance. Profile names are non-secret.
+  private activeProfileName?: string;
+  private stateless: boolean;
 
   constructor(serverInfo: ServerInfo) {
     super({
@@ -57,8 +72,15 @@ export class Server extends McpServer {
     });
     this.defaultBaseUrl = serverInfo.argocdBaseUrl;
     this.defaultApiToken = serverInfo.argocdApiToken;
-    this.tokenRegistry = serverInfo.tokenRegistry ?? tokenRegistryFromEnv();
+    const staticRegistry = serverInfo.tokenRegistry ?? new TokenRegistry();
+    this.registrySource = serverInfo.registrySource ?? {
+      get: () => staticRegistry,
+      reload: () => staticRegistry
+    };
     this.argocdClient = new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
+    this.stateless = serverInfo.stateless ?? false;
+    // Start on the registry's default profile, if one is configured.
+    this.activeProfileName = this.registrySource.get().getDefaultProfileName();
 
     const isReadOnly =
       String(process.env.MCP_READ_ONLY ?? '')
@@ -274,6 +296,66 @@ export class Server extends McpServer {
         )
     );
 
+    // Profile (context) selector tools. These operate on registry/session
+    // metadata, not on a remote ArgoCD instance, so they are always available
+    // (including in read-only mode) and never resolve an ArgoCD client. Tokens
+    // are never exposed by any of them.
+    this.addMetaTool(
+      'list_profiles',
+      'list_profiles returns the configured ArgoCD profiles (named instances) as { name, baseUrl } objects, along with which profile is currently active and which is the default. Tokens are never included. Use set_profile to switch the active profile.',
+      {},
+      () => {
+        // Opportunistically re-read the config so profiles added since startup
+        // (e.g. via `argocd login`) show up without restarting the server.
+        const registry = this.registrySource.reload();
+        return {
+          profiles: registry.listProfiles(),
+          active: this.activeProfileName ?? null,
+          default: registry.getDefaultProfileName() ?? null
+        };
+      }
+    );
+    this.addMetaTool(
+      'get_current_profile',
+      'get_current_profile returns the profile currently active for this session as { name, baseUrl }. When no profile is active, returns the default base URL that calls target instead.',
+      {},
+      () => {
+        const registry = this.registrySource.reload();
+        const profile = this.activeProfileName
+          ? registry.getProfile(this.activeProfileName)
+          : undefined;
+        if (profile) return profile;
+        return { active: null, defaultBaseUrl: this.defaultBaseUrl || null };
+      }
+    );
+    this.addMetaTool(
+      'set_profile',
+      "set_profile selects the active ArgoCD profile for this session by name. Subsequent tool calls that do not override the base URL will target the selected profile's instance. Use list_profiles to see available names.",
+      {
+        name: z
+          .string()
+          .describe(
+            'Name of the profile to activate. Must match a configured profile (see list_profiles).'
+          )
+      },
+      ({ name }) => {
+        // Reload first so a profile added since startup can be selected.
+        const profile = this.registrySource.reload().getProfile(name);
+        if (!profile) {
+          throw new Error(
+            `Unknown ArgoCD profile "${name}". Use list_profiles to see available profiles.`
+          );
+        }
+        this.activeProfileName = profile.name;
+        const result: { profile: typeof profile; warning?: string } = { profile };
+        if (this.stateless) {
+          result.warning =
+            'Profile set for this request only; in stateless HTTP mode session state does not persist across requests. Configure a default profile in the token registry instead.';
+        }
+        return result;
+      }
+    );
+
     // Only register modification tools if not in read-only mode
     if (!isReadOnly) {
       this.addJsonOutputTool(
@@ -396,8 +478,34 @@ export class Server extends McpServer {
   // This lets a single server target multiple ArgoCD instances, each with its
   // own token, without the token ever appearing in a tool-call payload: callers
   // pass only the (non-secret) base URL and the server pairs it with the token.
+  // Resolve the effective base URL for a call. Precedence:
+  //   1. the per-call argocdBaseUrl argument (most explicit);
+  //   2. the session's active profile (set via set_profile or the registry
+  //      default), resolved to its base URL;
+  //   3. the session default base URL.
+  // The token-selection logic in resolveClient below is intentionally left
+  // unchanged: a profile simply yields a base URL, which then resolves its
+  // token through the same registry/default rules, preserving the invariant
+  // that the default token is only ever sent to the default base URL.
+  private resolveBaseUrl(args: ArgoCDArgs, registry: TokenRegistry): string {
+    if (args.argocdBaseUrl) return args.argocdBaseUrl;
+    if (this.activeProfileName) {
+      const profile = registry.getProfile(this.activeProfileName);
+      if (!profile) {
+        throw new Error(
+          `Unknown ArgoCD profile "${this.activeProfileName}". Use list_profiles to see available profiles.`
+        );
+      }
+      return profile.baseUrl;
+    }
+    return this.defaultBaseUrl;
+  }
+
   private resolveClient(args: ArgoCDArgs): ArgoCDClient {
-    const baseUrl = args.argocdBaseUrl || this.defaultBaseUrl;
+    // Read the currently loaded registry once (no file I/O); the profile tools
+    // are what refresh it from disk.
+    const registry = this.registrySource.get();
+    const baseUrl = this.resolveBaseUrl(args, registry);
 
     // The base URL is optional at the session level; when no default is
     // configured, the caller must supply the argocdBaseUrl argument.
@@ -418,8 +526,8 @@ export class Server extends McpServer {
     const isDefaultBaseUrl =
       TokenRegistry.normalize(baseUrl) === TokenRegistry.normalize(this.defaultBaseUrl);
     const apiToken = isDefaultBaseUrl
-      ? this.defaultApiToken || this.tokenRegistry.getToken(baseUrl)
-      : this.tokenRegistry.getToken(baseUrl);
+      ? this.defaultApiToken || registry.getToken(baseUrl)
+      : registry.getToken(baseUrl);
 
     if (!apiToken) {
       throw new Error(
@@ -471,6 +579,33 @@ export class Server extends McpServer {
           client,
           extra
         );
+        return {
+          isError: false,
+          content: [{ type: 'text', text: JSON.stringify(result) }]
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }]
+        };
+      }
+    });
+  }
+
+  // Register a tool that operates on registry/session metadata rather than a
+  // remote ArgoCD instance. Unlike addJsonOutputTool it does NOT merge the
+  // argocdBaseUrl argument or resolve an ArgoCD client; it just wraps the
+  // callback's return value in the standard JSON result/error envelope.
+  private addMetaTool<Args extends ZodRawShape, T>(
+    name: string,
+    description: string,
+    paramsSchema: Args,
+    cb: (cbArgs: Parameters<ToolCallback<Args>>[0]) => T
+  ) {
+    this.tool(name, description, paramsSchema, async (...args) => {
+      try {
+        const [allArgs] = args as [Parameters<ToolCallback<Args>>[0]];
+        const result = cb.call(this, allArgs);
         return {
           isError: false,
           content: [{ type: 'text', text: JSON.stringify(result) }]

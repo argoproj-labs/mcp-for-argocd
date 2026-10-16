@@ -90,31 +90,49 @@ const start = (run: () => void) => {
   }
 };
 
+// Description shared by the --config option on every command. The path is
+// opt-in: the default ~/.config/argocd/config location is never read implicitly.
+const configOptionDescription =
+  'Path to an Argo CD CLI config file (the one written by `argocd login`/`argocd context`) to load instances as profiles. Defaults to the ARGOCD_CONFIG env var.';
+
 export const cmd = () => {
   const exe = yargs(hideBin(process.argv));
 
   exe.command(
     'stdio',
     'Start ArgoCD MCP server using stdio.',
-    () => {},
-    () => connectStdioTransport()
+    (yargs) => {
+      return yargs.option('config', { type: 'string', description: configOptionDescription });
+    },
+    ({ config }) => connectStdioTransport(config)
   );
 
-  exe.command('sse', 'Start ArgoCD MCP server using SSE.', listenerOptions, (argv) =>
-    start(() => connectSSETransport(transportOptions(argv)))
+  exe.command(
+    'sse',
+    'Start ArgoCD MCP server using SSE.',
+    (yargs) => listenerOptions(yargs).option('config', { type: 'string', description: configOptionDescription }),
+    (argv) => start(() => connectSSETransport({ ...transportOptions(argv), configPath: argv.config }))
   );
 
   exe.command(
     'http',
     'Start ArgoCD MCP server using Http Stream.',
     (yargs) =>
-      listenerOptions(yargs).option('stateless', {
-        type: 'boolean',
-        default: false,
-        description: 'Run in stateless mode'
-      }),
+      listenerOptions(yargs)
+        .option('stateless', {
+          type: 'boolean',
+          default: false,
+          description: 'Run in stateless mode'
+        })
+        .option('config', { type: 'string', description: configOptionDescription }),
     (argv) =>
-      start(() => connectHttpTransport({ ...transportOptions(argv), stateless: argv.stateless }))
+      start(() =>
+        connectHttpTransport({
+          ...transportOptions(argv),
+          stateless: argv.stateless,
+          configPath: argv.config
+        })
+      )
   );
 
   // Without strict(), a misspelled security flag ('--allowed-host') is silently
