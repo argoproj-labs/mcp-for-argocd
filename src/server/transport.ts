@@ -4,6 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { logger } from '../logging/logging.js';
 import { createServer } from './server.js';
 import { randomUUID } from 'node:crypto';
+import { TokenRefresher } from '../argocd/tokenRefresher.js';
 import type { AddressInfo } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
@@ -19,15 +20,30 @@ import {
 // construction.
 const tokenRegistry = tokenRegistryFromEnv();
 
-export const connectStdioTransport = () => {
+export type StdioOptions = {
+  argocdBaseUrl?: string;
+  argocdApiToken?: string;
+  tokenRefresher?: TokenRefresher;
+};
+
+export const connectStdioTransport = (options: StdioOptions = {}) => {
+  const argocdBaseUrl = options.argocdBaseUrl ?? process.env.ARGOCD_BASE_URL ?? '';
+  const argocdApiToken = options.argocdApiToken ?? process.env.ARGOCD_API_TOKEN ?? '';
+
   const server = createServer({
-    argocdBaseUrl: process.env.ARGOCD_BASE_URL || '',
-    argocdApiToken: process.env.ARGOCD_API_TOKEN || '',
-    tokenRegistry
+    argocdBaseUrl,
+    argocdApiToken,
+    tokenRegistry,
+    tokenRefresher: options.tokenRefresher
   });
+
+  if (options.tokenRefresher) {
+    options.tokenRefresher.start(argocdApiToken, (newToken) => server.updateToken(newToken));
+  }
 
   logger.info('Connecting to stdio transport');
   server.connect(new StdioServerTransport());
+  return server;
 };
 
 export type TransportOptions = ListenerSecurityOptions;
