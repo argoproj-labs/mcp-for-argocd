@@ -1,3 +1,45 @@
+import { readFileSync } from 'node:fs';
+import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit } from 'undici';
+
+// Mirrors the argocd CLI flags --client-crt, --client-crt-key, --server-crt, --insecure.
+export interface TlsOptions {
+  clientCrt?: string;
+  clientCrtKey?: string;
+  serverCrt?: string;
+  insecure?: boolean;
+}
+
+// Process-wide: every HttpClient talks to Argo CD with the same TLS settings.
+let dispatcher: Agent | undefined;
+
+export const configureTls = ({ clientCrt, clientCrtKey, serverCrt, insecure }: TlsOptions) => {
+  if (!clientCrt !== !clientCrtKey) {
+    throw new Error('--client-crt and --client-crt-key must be set together');
+  }
+  dispatcher =
+    clientCrt || serverCrt || insecure
+      ? new Agent({
+          connect: {
+            cert: clientCrt ? readFileSync(clientCrt) : undefined,
+            key: clientCrtKey ? readFileSync(clientCrtKey) : undefined,
+            // Like the argocd CLI, --server-crt replaces the system trust store.
+            ca: serverCrt ? readFileSync(serverCrt) : undefined,
+            rejectUnauthorized: !insecure
+          }
+        })
+      : undefined;
+};
+
+// undici's own fetch when a dispatcher is set: Node's bundled undici may not accept
+// a dispatcher from a different undici version.
+const doFetch = (url: URL, init: RequestInit): Promise<Response> =>
+  dispatcher
+    ? (undiciFetch(url, {
+        ...(init as UndiciRequestInit),
+        dispatcher
+      }) as unknown as Promise<Response>)
+    : fetch(url, init);
+
 export interface HttpResponse<T> {
   status: number;
   headers: Headers;
@@ -31,7 +73,7 @@ export class HttpClient {
         urlObject.searchParams.set(key, value?.toString() || '');
       });
     }
-    const response = await fetch(urlObject, {
+    const response = await doFetch(urlObject, {
       ...init,
       headers: { ...init?.headers, ...this.headers }
     });
@@ -55,7 +97,7 @@ export class HttpClient {
         urlObject.searchParams.set(key, value?.toString() || '');
       });
     }
-    const response = await fetch(urlObject, {
+    const response = await doFetch(urlObject, {
       ...init,
       headers: { ...init?.headers, ...this.headers }
     });

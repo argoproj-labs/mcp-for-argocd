@@ -139,17 +139,30 @@ The server provides the following ArgoCD management tools:
 
 2. Configure Claude Desktop to use this configuration file in settings.
 
-### Self-signed Certificates
+### TLS, Self-signed Certificates and mTLS
 
-If your Argo CD instance uses self-signed certificates or certificates from a private Certificate Authority (CA), you may need to add the following environment variable to your configuration:
+TLS to Argo CD is configured with the same flags as the `argocd` CLI. Each flag also reads an env var, which is the way to set it for the `stdio` transport:
 
+| Flag | Env var | Description |
+|------|---------|-------------|
+| `--client-crt` | `ARGOCD_CLIENT_CRT` | Client certificate file (PEM) for mTLS |
+| `--client-crt-key` | `ARGOCD_CLIENT_CRT_KEY` | Client certificate key file (PEM) |
+| `--server-crt` | `ARGOCD_SERVER_CRT` | Server certificate / CA file to trust. Replaces the system trust store |
+| `--insecure` | `ARGOCD_INSECURE=true` | Skip server certificate verification |
+
+`--client-crt` and `--client-crt-key` must be set together. The API token is still sent alongside the client certificate.
+
+```json
+"env": {
+  "ARGOCD_BASE_URL": "https://argocd.example.com",
+  "ARGOCD_API_TOKEN": "<token>",
+  "ARGOCD_CLIENT_CRT": "/path/to/client.crt",
+  "ARGOCD_CLIENT_CRT_KEY": "/path/to/client.key",
+  "ARGOCD_SERVER_CRT": "/path/to/ca.crt"
+}
 ```
-"NODE_TLS_REJECT_UNAUTHORIZED": "0"
-```
 
-This disables TLS certificate validation for Node.js when connecting to Argo CD instances using self-signed certificates or certificates from private CAs that aren't trusted by your system's certificate store.
-
-> **Warning**: Disabling SSL verification reduces security. Use this setting only in development environments or when you understand the security implications.
+> **Warning**: `--insecure` disables server certificate verification. Prefer `--server-crt` for self-signed or private-CA certificates.
 
 
 ### Providing ArgoCD Credentials

@@ -8,6 +8,7 @@ import {
 } from '../server/transport.js';
 import { DEFAULT_BIND_ADDRESS } from '../server/security.js';
 import { logger } from '../logging/logging.js';
+import { configureTls } from '../argocd/http.js';
 
 // Options shared by the two network transports. The inbound token is env-only:
 // argv is readable by every user on the machine via `ps`.
@@ -92,6 +93,31 @@ const start = (run: () => void) => {
 
 export const cmd = () => {
   const exe = yargs(hideBin(process.argv));
+
+  // Outbound TLS to Argo CD, named after the argocd CLI flags. Env vars are the
+  // defaults so the stdio transport (configured through env in MCP clients) can use them.
+  exe
+    .option('client-crt', {
+      type: 'string',
+      default: process.env.ARGOCD_CLIENT_CRT,
+      description: 'Client certificate file for mTLS to Argo CD (env: ARGOCD_CLIENT_CRT)'
+    })
+    .option('client-crt-key', {
+      type: 'string',
+      default: process.env.ARGOCD_CLIENT_CRT_KEY,
+      description: 'Client certificate key file (env: ARGOCD_CLIENT_CRT_KEY)'
+    })
+    .option('server-crt', {
+      type: 'string',
+      default: process.env.ARGOCD_SERVER_CRT,
+      description: 'Argo CD server certificate / CA file (env: ARGOCD_SERVER_CRT)'
+    })
+    .option('insecure', {
+      type: 'boolean',
+      default: process.env.ARGOCD_INSECURE === 'true',
+      description: 'Skip Argo CD server certificate verification (env: ARGOCD_INSECURE)'
+    })
+    .middleware((argv) => start(() => configureTls(argv)));
 
   exe.command(
     'stdio',
