@@ -1,0 +1,14 @@
+apiVersion: v2
+name: mcp-for-argocd
+description: A Helm chart for MCP server for ArgoCD
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+- argoproj
+- argocd
+- mcp
+home: https://github.com/argoproj/argo-helm
+sources:
+- https://github.com/argoproj/argo-helm/tree/main/charts/mcp-for-argocd
+- https://github.com/argoproj/mcp-for-argocd
