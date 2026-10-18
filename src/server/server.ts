@@ -338,7 +338,19 @@ export class Server extends McpServer {
           revision: z
             .string()
             .optional()
-            .describe('Sync to a specific revision instead of the latest'),
+            .describe('Sync a single-source application to a specific revision'),
+          revisions: z
+            .array(z.string().min(1))
+            .min(1)
+            .optional()
+            .describe(
+              'Multi-source revisions paired with sourcePositions; do not combine with revision'
+            ),
+          sourcePositions: z
+            .array(z.number().int().positive())
+            .min(1)
+            .optional()
+            .describe('Unique one-based source positions, one for each entry in revisions'),
           syncOptions: z
             .array(z.string())
             .optional()
@@ -347,14 +359,25 @@ export class Server extends McpServer {
             )
         },
         async (
-          { applicationName, applicationNamespace, dryRun, prune, revision, syncOptions },
+          {
+            applicationName,
+            applicationNamespace,
+            dryRun,
+            prune,
+            revision,
+            revisions,
+            sourcePositions,
+            syncOptions
+          },
           client
         ) => {
-          const options: Record<string, string | boolean | string[]> = {};
+          const options: NonNullable<Parameters<ArgoCDClient['syncApplication']>[1]> = {};
           if (applicationNamespace) options.appNamespace = applicationNamespace;
           if (dryRun !== undefined) options.dryRun = dryRun;
           if (prune !== undefined) options.prune = prune;
           if (revision) options.revision = revision;
+          if (revisions) options.revisions = revisions;
+          if (sourcePositions) options.sourcePositions = sourcePositions;
           if (syncOptions) options.syncOptions = syncOptions;
 
           return await client.syncApplication(
