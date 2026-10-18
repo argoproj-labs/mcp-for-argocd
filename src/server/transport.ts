@@ -130,9 +130,11 @@ export const connectSSETransport = (options: TransportOptions) => {
   return listen(app, security.bindAddress, port, 'SSE transport');
 };
 
-export const connectHttpTransport = (options: TransportOptions & { stateless?: boolean }) => {
+export const connectHttpTransport = (
+  options: TransportOptions & { stateless?: boolean; jsonResponse?: boolean }
+) => {
   const security = resolveListenerSecurity(options);
-  const { port, stateless = false } = options;
+  const { port, stateless = false, jsonResponse = false } = options;
   const app = express();
   registerHealthz(app);
   applyListenerSecurity(app, security);
@@ -154,12 +156,13 @@ export const connectHttpTransport = (options: TransportOptions & { stateless?: b
 
       transport = new StreamableHTTPServerTransport(
         stateless
-          ? { sessionIdGenerator: undefined }
+          ? { sessionIdGenerator: undefined, enableJsonResponse: jsonResponse }
           : {
               sessionIdGenerator: () => randomUUID(),
               onsessioninitialized: (newSessionId) => {
                 httpTransports[newSessionId] = transport;
-              }
+              },
+              enableJsonResponse: jsonResponse
             }
       );
 
@@ -206,6 +209,6 @@ export const connectHttpTransport = (options: TransportOptions & { stateless?: b
     app,
     security.bindAddress,
     port,
-    `Http Stream transport${stateless ? ' (stateless mode)' : ''}`
+    `Http Stream transport${stateless ? ' (stateless mode)' : ''}${jsonResponse ? ' (json response mode)' : ''}`
   );
 };
