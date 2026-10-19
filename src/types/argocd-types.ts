@@ -14,3 +14,4 @@ export type V1alpha1ApplicationResourceResult = ArgoCD.ApplicationApplicationRes
 export type V1alpha1Cluster = ArgoCD.V1alpha1Cluster;
 export type V1alpha1ClusterList = ArgoCD.V1alpha1ClusterList;
 export type V1alpha1AppProject = ArgoCD.V1alpha1AppProject;
+export type V1alpha1AppProjectList = ArgoCD.V1alpha1AppProjectList;
