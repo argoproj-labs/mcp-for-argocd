@@ -10,6 +10,7 @@ import {
   ResourceRefSchema
 } from '../shared/models/schema.js';
 import { TokenRegistry, tokenRegistryFromEnv } from './tokenRegistry.js';
+import { StaticTokenProvider, type TokenProvider } from '../argocd/tokenProvider.js';
 
 type ServerInfo = {
   argocdBaseUrl: string;
@@ -42,12 +43,14 @@ type ArgoCDArgs = {
 
 export class Server extends McpServer {
   private defaultBaseUrl: string;
-  private defaultApiToken: string;
+  // The session credential, when one was supplied; undefined in a tokenless
+  // session (allowed when a registry is configured).
+  private defaultTokenProvider?: TokenProvider;
   private tokenRegistry: TokenRegistry;
-  private argocdClient: ArgoCDClient;
-  // Cache per-credential clients to avoid rebuilding the HttpClient on every
-  // call. Keyed by baseUrl + token, since the same base URL may resolve to
-  // different tokens (request token vs. registry token vs. default).
+  // One client per (normalized) base URL. For a given server the credential a
+  // base URL resolves to never changes, and command-backed providers keep their
+  // token cache on the provider, so reusing the client is what keeps a burst of
+  // tool calls from re-running the token command.
   private clientCache = new Map<string, ArgoCDClient>();
 
   constructor(serverInfo: ServerInfo) {
@@ -56,9 +59,10 @@ export class Server extends McpServer {
       version: packageJSON.version
     });
     this.defaultBaseUrl = serverInfo.argocdBaseUrl;
-    this.defaultApiToken = serverInfo.argocdApiToken;
+    this.defaultTokenProvider = serverInfo.argocdApiToken
+      ? new StaticTokenProvider(serverInfo.argocdApiToken)
+      : undefined;
     this.tokenRegistry = serverInfo.tokenRegistry ?? tokenRegistryFromEnv();
-    this.argocdClient = new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
 
     const isReadOnly =
       String(process.env.MCP_READ_ONLY ?? '')
@@ -391,7 +395,9 @@ export class Server extends McpServer {
   //      ARGOCD_API_TOKEN env var. If the caller supplied one, it ALWAYS wins.
   //   2. Registry token — when no request token was supplied, look the resolved
   //      base URL up in the configured token registry (ARGOCD_TOKEN_REGISTRY)
-  //      and use its token if the base URL is registered.
+  //      and use its credential if the base URL is registered. A registry
+  //      credential is either a static token or a tokenCommand that is run
+  //      (and re-run on expiry) to mint one.
   //
   // This lets a single server target multiple ArgoCD instances, each with its
   // own token, without the token ever appearing in a tool-call payload: callers
@@ -415,13 +421,18 @@ export class Server extends McpServer {
     // argocdBaseUrl to an arbitrary host and have the server send the default
     // token there (token exfiltration). For any overridden base URL, the token
     // must come from the registry — i.e. the operator explicitly registered it.
-    const isDefaultBaseUrl =
-      TokenRegistry.normalize(baseUrl) === TokenRegistry.normalize(this.defaultBaseUrl);
-    const apiToken = isDefaultBaseUrl
-      ? this.defaultApiToken || this.tokenRegistry.getToken(baseUrl)
-      : this.tokenRegistry.getToken(baseUrl);
+    const cacheKey = TokenRegistry.normalize(baseUrl);
+    const cached = this.clientCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
 
-    if (!apiToken) {
+    const isDefaultBaseUrl = cacheKey === TokenRegistry.normalize(this.defaultBaseUrl);
+    const tokenProvider = isDefaultBaseUrl
+      ? (this.defaultTokenProvider ?? this.tokenRegistry.getProvider(baseUrl))
+      : this.tokenRegistry.getProvider(baseUrl);
+
+    if (!tokenProvider) {
       throw new Error(
         `Missing required ArgoCD API token for base URL "${baseUrl}". ` +
           'Provide it via the x-argocd-api-token header / ARGOCD_API_TOKEN env var, ' +
@@ -429,19 +440,11 @@ export class Server extends McpServer {
       );
     }
 
-    // Fast path: default base URL with the default token — reuse the session client.
-    if (baseUrl === this.defaultBaseUrl && apiToken === this.defaultApiToken) {
-      return this.argocdClient;
-    }
-
-    // Cache clients keyed by baseUrl + token: the same base URL can resolve to
-    // different tokens depending on whether a request token was supplied.
-    const cacheKey = `${baseUrl} ${apiToken}`;
-    let client = this.clientCache.get(cacheKey);
-    if (!client) {
-      client = new ArgoCDClient(baseUrl, apiToken);
-      this.clientCache.set(cacheKey, client);
-    }
+    // The token itself is resolved lazily by the HttpClient on each request, so
+    // an expired (or not-yet-run) command-backed provider neither blocks nor
+    // fails client construction.
+    const client = new ArgoCDClient(baseUrl, tokenProvider);
+    this.clientCache.set(cacheKey, client);
     return client;
   }
 
