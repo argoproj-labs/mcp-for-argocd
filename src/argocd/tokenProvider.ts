@@ -126,7 +126,11 @@ export class CommandTokenProvider implements TokenProvider {
         },
         (error, stdout, stderr) => {
           if (error) {
-            const failure = error as NodeJS.ErrnoException & { killed?: boolean; code?: unknown };
+            const failure = error as Error & {
+              killed?: boolean;
+              signal?: NodeJS.Signals | null;
+              code?: number | string | null;
+            };
             // Node reports a timeout as a SIGTERM-killed process; surface it
             // as such rather than as an opaque "null exit code".
             if (failure.killed && failure.signal) {
