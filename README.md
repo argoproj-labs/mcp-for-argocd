@@ -187,16 +187,80 @@ To target **multiple ArgoCD instances, each with its own token**, configure a to
 ARGOCD_TOKEN_REGISTRY_PATH=/app/argocd-mcp/token-registry.json
 ```
 
-The file contains a JSON array mapping a base URL to the token that should be used for it:
+The file contains a JSON array mapping a base URL to the credential that should be used for it. Each entry has a `baseUrl` and **exactly one** of a static `token` or a [`tokenCommand`](#dynamic-tokens--tokencommand-sso-gcp-iap-vault-) that mints one on demand:
 
 ```json
 [
   { "baseUrl": "https://argo-a.example.com", "token": "<token-a>" },
-  { "baseUrl": "https://argo-b.example.com", "token": "<token-b>" }
+  { "baseUrl": "https://argo-b.example.com", "token": "<token-b>" },
+  {
+    "baseUrl": "https://argo-c.example.com",
+    "tokenCommand": ["gcloud", "auth", "print-identity-token", "--audiences=<iap-client-id>"]
+  }
 ]
 ```
 
 > **Secure the file.** Restrict it to the server's user (e.g. `chmod 400`) and prefer a secret-management mechanism (Kubernetes secret volume, Vault agent, etc.) over a plaintext file on disk.
+
+##### Dynamic tokens — `tokenCommand` (SSO, GCP IAP, Vault, …)
+
+A static `token` only works for long-lived ArgoCD API tokens. When the bearer token ArgoCD (or a proxy in front of it) expects is short-lived — a GCP Identity-Aware Proxy identity token, an SSO session token, a Vault lease — give the entry a `tokenCommand` instead. The server runs the command, uses its **trimmed stdout** as the bearer token, caches it, and runs the command again when the cache expires or ArgoCD rejects the token.
+
+| Field | Type | Description |
+|---|---|---|
+| `baseUrl` | string | ArgoCD instance URL (required) |
+| `token` | string | Static bearer token (mutually exclusive with `tokenCommand`) |
+| `tokenCommand` | string[] | Executable followed by its arguments, run to obtain a fresh token (mutually exclusive with `token`) |
+| `tokenTTLSeconds` | number | How long a command-generated token is reused before the command runs again (default `2700`, 45 min) |
+| `tokenCommandTimeoutSeconds` | number | Maximum time to wait for the command (default `10`) |
+
+How it behaves:
+
+- **No shell.** The array is passed straight to the OS (`execFile`), so arguments are never interpreted by a shell — the same model as `kubectl` exec credential plugins. If you need shell features, point `tokenCommand` at a script.
+- **Cached and coalesced.** One token per entry is cached for `tokenTTLSeconds`; concurrent tool calls that miss the cache share a single execution, so a burst of calls spawns one process.
+- **Refreshed on rejection.** If ArgoCD answers `401` the cached token is discarded, the command is run again and the request is retried once. This is what makes an expired session self-heal without restarting the server.
+- **Fails closed.** Empty stdout, a non-zero exit, a spawn failure or a timeout all fail the tool call with an error that names the executable and includes the last lines of **stderr** (where helpers print hints like "run `… login` first"); stdout is never echoed, since that is where the token would be.
+- **Provider-agnostic.** Anything that prints a token to stdout works: `gcloud`, `aws`, `az`, `vault`, `argocd`, or your own script. The server has no cloud-specific dependencies.
+
+**GCP Identity-Aware Proxy.** IAP requires an OIDC identity token for the IAP OAuth client as the audience; it expires after about an hour:
+
+```json
+[
+  {
+    "baseUrl": "https://argocd.dev.example.com",
+    "tokenCommand": ["gcloud", "auth", "print-identity-token", "--audiences=123456789012-abc.apps.googleusercontent.com"]
+  }
+]
+```
+
+**ArgoCD SSO (Dex / OIDC) via the `argocd` CLI.** After `argocd login <host> --sso`, the CLI keeps the session's `auth-token` (and, when the identity provider issues one, a `refresh-token`) in its config file (`~/.config/argocd/config`), and transparently refreshes the `auth-token` whenever a CLI command runs. A small helper that runs any cheap CLI command and then prints the current token therefore gives you an automatically renewed SSO session under your own identity, with no shared service-account token:
+
+```bash
+#!/usr/bin/env bash
+# argocd-sso-token: print the argocd CLI's SSO token for a context, letting the
+# CLI refresh it first. Usage: argocd-sso-token <context>  (needs argocd + yq)
+set -euo pipefail
+ctx="$1"
+cfg="${ARGOCD_CONFIG:-$HOME/.config/argocd/config}"
+argocd account get-user-info --argocd-context "$ctx" >/dev/null
+user="$(yq -r ".contexts[] | select(.name == \"$ctx\") | .user" "$cfg")"
+yq -r ".users[] | select(.name == \"$user\") | .\"auth-token\"" "$cfg"
+```
+
+```json
+[
+  {
+    "baseUrl": "https://argocd.example.com",
+    "tokenCommand": ["/usr/local/bin/argocd-sso-token", "argocd.example.com"],
+    "tokenTTLSeconds": 600,
+    "tokenCommandTimeoutSeconds": 30
+  }
+]
+```
+
+When the refresh token itself has expired (or the provider does not issue one) the helper exits non-zero with the CLI's own message (e.g. `Refresh token is invalid…`), which surfaces verbatim in the tool error; run `argocd login … --sso` again and the next call picks the new session up without restarting the server.
+
+> `tokenTTLSeconds` and `tokenCommandTimeoutSeconds` are only valid together with `tokenCommand`; setting them on a static `token` entry is rejected at startup so a token you expected to be refreshed is never silently left static.
 
 > **Local development.** The `make run` / `make dev` targets run without a registry by default; pass `ARGOCD_TOKEN_REGISTRY_PATH=/path/to/tokens.json` to use one. Do **not** place the file under `dist/` — `tsup` runs with `clean: true` and wipes that directory on every build. See [Running locally](#running-locally).
 
@@ -208,7 +272,7 @@ The server resolves calls using one of two distinct tokens. Keeping them straigh
 
 | | **Default token** | **Registry token** |
 |---|---|---|
-| **Source** | `x-argocd-api-token` header / `ARGOCD_API_TOKEN` env var (the session credential) | A `token` entry in the `ARGOCD_TOKEN_REGISTRY_PATH` JSON file, keyed by `baseUrl` |
+| **Source** | `x-argocd-api-token` header / `ARGOCD_API_TOKEN` env var (the session credential) | A `token` or `tokenCommand` entry in the `ARGOCD_TOKEN_REGISTRY_PATH` JSON file, keyed by `baseUrl` |
 | **Scope** | The **default base URL only** (`x-argocd-base-url` / `ARGOCD_BASE_URL`) | The **specific base URL** its entry is keyed to |
 | **Used for** | A call that targets the default base URL | A call that targets any base URL present in the registry (including the default, as a fallback) |
 | **Never used for** | Any base URL other than the default — it is **never** sent to a different host | Any base URL not registered |
@@ -383,7 +447,7 @@ To configure credentials, export the relevant environment variable on the comman
 |---|---|
 | `ARGOCD_BASE_URL` | Default ArgoCD instance URL used when a call doesn't override it. |
 | `ARGOCD_API_TOKEN` | Static API token for the default base URL. |
-| `ARGOCD_TOKEN_REGISTRY_PATH` | Path to a JSON [token registry](#token-registry--per-base-url-tokens-multi-instance) mapping base URLs to tokens (for targeting multiple instances). |
+| `ARGOCD_TOKEN_REGISTRY_PATH` | Path to a JSON [token registry](#token-registry--per-base-url-tokens-multi-instance) mapping base URLs to static tokens or token-minting commands (for targeting multiple instances, or instances behind SSO / GCP IAP). |
 
 These are all outbound credentials. For who may reach the listener, see [Network Exposure](#network-exposure).
 
