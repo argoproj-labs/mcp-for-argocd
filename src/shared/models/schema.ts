@@ -67,3 +67,14 @@ export const ApplicationSchema = z.object({
       )
   })
 });
+
+// Basic ApplicationSet schema - we'll keep it flexible for now since spec can be complex
+export const ApplicationSetSchema = z.object({
+  metadata: z.object({
+    name: z.string(),
+    namespace: ApplicationNamespaceSchema
+  }),
+  spec: z.record(z.any()).describe(
+    `ApplicationSet spec. Can include generators, template, syncPolicy, etc.`
+  )
+});
