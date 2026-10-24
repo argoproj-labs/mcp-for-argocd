@@ -4,6 +4,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { logger } from '../logging/logging.js';
 import { createServer } from './server.js';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import https from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
@@ -40,15 +42,37 @@ const registerHealthz = (app: express.Express) => {
   });
 };
 
+// When MCP_TLS_CERT_FILE and MCP_TLS_KEY_FILE are both set, bind with HTTPS instead
+// of plain HTTP (for example operator-mounted certs and a same-pod reverse proxy).
+const tlsListenOptions = (): https.ServerOptions | null => {
+  const certFile = process.env.MCP_TLS_CERT_FILE;
+  const keyFile = process.env.MCP_TLS_KEY_FILE;
+  if (!certFile && !keyFile) return null;
+  if (!certFile || !keyFile) {
+    throw new Error(
+      'MCP_TLS_CERT_FILE and MCP_TLS_KEY_FILE must both be set to enable TLS, or both unset for HTTP.'
+    );
+  }
+  return {
+    cert: fs.readFileSync(certFile),
+    key: fs.readFileSync(keyFile)
+  };
+};
+
 // Log the address actually bound, so an operator can see whether the listener is
 // loopback-only or exposed. Both handlers hang off events rather than
-// app.listen()'s callback, which Express invokes even when the bind fails, with
+// listen()'s callback, which Express invokes even when the bind fails, with
 // server.address() still null.
 const listen = (app: express.Express, bindAddress: string, port: number, label: string) => {
-  const server = app.listen(port, bindAddress);
+  const tlsOptions = tlsListenOptions();
+  const server = tlsOptions ? https.createServer(tlsOptions, app) : app.listen(port, bindAddress);
+  if (tlsOptions) {
+    server.listen(port, bindAddress);
+  }
   server.on('listening', () => {
     const { address, port: boundPort } = server.address() as AddressInfo;
-    logger.info(`${label} listening on ${address}:${boundPort}`);
+    const scheme = tlsOptions ? 'https' : 'http';
+    logger.info(`${label} listening on ${scheme}://${address}:${boundPort}`);
   });
   server.on('error', (err: NodeJS.ErrnoException) => {
     logger.error(`${label} could not bind ${bindAddress}:${port}: ${err.code ?? err.message}`);

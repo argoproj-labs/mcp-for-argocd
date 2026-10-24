@@ -32,3 +32,4 @@ Fixes land on `main` and ship in the next release. Please confirm an issue again
 - **Token whitespace.** Surrounding whitespace is stripped, since `$(cat token)` and `--from-file` secrets carry a trailing newline. Whitespace inside the token is a startup error, because such a token could never be sent in a header.
 - **Bind address.** All of `127.0.0.0/8` counts as loopback, and IPv6 works with or without brackets. The default is IPv4 only, so a client insisting on `http://[::1]:3000` needs `--bind-address ::1`, or `::` for both stacks.
 - **Loopback is reachable from a same-pod sidecar.** A published port (`docker run -p …`) is what does not reach a loopback listener; that needs an explicit wider bind.
+- **In-pod TLS is optional.** When `MCP_TLS_CERT_FILE` and `MCP_TLS_KEY_FILE` are set, the listener speaks HTTPS so a sidecar proxy can use an `https://` upstream URL. This does not relax bind-address or `MCP_AUTH_TOKEN` requirements.

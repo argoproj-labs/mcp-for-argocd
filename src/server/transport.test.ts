@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import { execSync } from 'node:child_process';
 import { test } from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
 import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AddressInfo, Server } from 'node:net';
 import { connectHttpTransport, connectSSETransport } from './transport.js';
 
@@ -199,6 +204,93 @@ const rawRequest = (port: number, payload: string): Promise<string> =>
     socket.on('end', () => resolve(response.split('\r\n')[0]));
     socket.on('error', reject);
   });
+
+const writeTlsPems = (): { dir: string; certFile: string; keyFile: string } => {
+  const dir = mkdtempSync(join(tmpdir(), 'mcp-tls-test-'));
+  const certFile = join(dir, 'tls.crt');
+  const keyFile = join(dir, 'tls.key');
+  execSync(
+    `openssl req -x509 -newkey rsa:2048 -keyout "${keyFile}" -out "${certFile}" -days 1 -nodes -subj /CN=localhost`,
+    { stdio: 'pipe' }
+  );
+  return { dir, certFile, keyFile };
+};
+
+const restoreEnv = (key: string, previous: string | undefined) => {
+  if (previous !== undefined) process.env[key] = previous;
+  else delete process.env[key];
+};
+
+const httpsRequest = (
+  port: number,
+  options: { method?: string; path?: string; headers?: Record<string, string> } = {}
+): Promise<{ status: number; body: string }> =>
+  new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        host: '127.0.0.1',
+        port,
+        path: options.path ?? '/healthz',
+        method: options.method ?? 'GET',
+        headers: options.headers ?? {},
+        rejectUnauthorized: false
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk) => (body += chunk));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
+
+test('setting only one TLS env var fails at startup', async () => {
+  const port = await freePort();
+  const prevCert = process.env.MCP_TLS_CERT_FILE;
+  const prevKey = process.env.MCP_TLS_KEY_FILE;
+  const { certFile, keyFile, dir } = writeTlsPems();
+  try {
+    process.env.MCP_TLS_CERT_FILE = certFile;
+    delete process.env.MCP_TLS_KEY_FILE;
+    assert.throws(() => connectHttpTransport({ port, authToken: INBOUND_TOKEN }), /both be set/);
+
+    delete process.env.MCP_TLS_CERT_FILE;
+    process.env.MCP_TLS_KEY_FILE = keyFile;
+    assert.throws(() => connectHttpTransport({ port, authToken: INBOUND_TOKEN }), /both be set/);
+  } finally {
+    restoreEnv('MCP_TLS_CERT_FILE', prevCert);
+    restoreEnv('MCP_TLS_KEY_FILE', prevKey);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('with TLS env vars set, /healthz is reachable over HTTPS without a token', async () => {
+  const { dir, certFile, keyFile } = writeTlsPems();
+  const prevCert = process.env.MCP_TLS_CERT_FILE;
+  const prevKey = process.env.MCP_TLS_KEY_FILE;
+  const previousToken = process.env.ARGOCD_API_TOKEN;
+  const port = await freePort();
+  process.env.MCP_TLS_CERT_FILE = certFile;
+  process.env.MCP_TLS_KEY_FILE = keyFile;
+  delete process.env.ARGOCD_API_TOKEN;
+  const server = connectHttpTransport({ port, authToken: INBOUND_TOKEN });
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const res = await httpsRequest(port, {
+      path: '/healthz',
+      headers: { host: '10.1.2.3:8080' }
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.body, /"status":"ok"/);
+  } finally {
+    if (previousToken !== undefined) process.env.ARGOCD_API_TOKEN = previousToken;
+    restoreEnv('MCP_TLS_CERT_FILE', prevCert);
+    restoreEnv('MCP_TLS_KEY_FILE', prevKey);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('an absent or empty Host header is rejected, not treated as an allowed name', async () => {
   const { port, close } = await startTransport(connectHttpTransport);

@@ -259,6 +259,8 @@ The `http` and `sse` transports open a network listener that reaches every ArgoC
 | Allowed `Origin` | `--allowed-origin` | — | loopback origins | Extra browser origin accepted in a request's `Origin` header. Repeat per origin. |
 | External auth | `--allow-unauthenticated` | — | `false` | Allows a non-loopback bind with no token, when something in front already authenticates callers. |
 | Port | `--port` | — | `3000` | Which port to listen on. |
+| TLS certificate | — | `MCP_TLS_CERT_FILE` | unset | PEM path for the listener certificate. Read at startup; requires `MCP_TLS_KEY_FILE`. |
+| TLS private key | — | `MCP_TLS_KEY_FILE` | unset | PEM path for the listener private key. Read at startup; requires `MCP_TLS_CERT_FILE`. |
 
 > `--bind-address` decides who may connect. `--allowed-host-header` only checks what an already-connected client claims. They are not a pair, and the second is not a firewall.
 
@@ -271,6 +273,7 @@ Behaviour:
 - `Host` is checked on a loopback bind, or on any bind with at least one `--allowed-host-header`. Otherwise the hostname clients legitimately use is unknown, so the check is skipped and a warning is logged.
 - `GET /healthz` is exempt, so a kubelet probe still succeeds. It returns liveness only.
 - Unusable configuration fails at startup with the reason, rather than being ignored.
+- When both `MCP_TLS_CERT_FILE` and `MCP_TLS_KEY_FILE` are set, the `http` and `sse` listeners use HTTPS; setting only one is a startup error. When neither is set, the listener stays HTTP (the default).
 - [Read-only mode](#read-only-mode) is independent of all of this and caps what any caller can do.
 
 Exposing the listener deliberately:
@@ -286,6 +289,8 @@ The container image keeps the same loopback default, so it needs no extra config
 docker run -e ARGOCD_BASE_URL=<argocd_url> -e ARGOCD_API_TOKEN=<argocd_token> \
   argoprojlabs/mcp-for-argocd
 ```
+
+When a reverse proxy in the same pod connects over HTTPS (for example `https://127.0.0.1:8443`), mount the certificate and key, point `MCP_TLS_CERT_FILE` and `MCP_TLS_KEY_FILE` at those files, and pass `http --port=8443` (or your chosen port). Bind address and inbound auth rules are unchanged.
 
 To publish a port, widen the bind and set an inbound credential:
 
