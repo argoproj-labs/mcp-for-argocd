@@ -175,3 +175,92 @@ test('with no default token, an overridden URL still resolves only from the regi
   assert.equal(result.isError, true);
   assert.match(textOf(result), /Missing required ArgoCD API token/);
 });
+
+// The tests below cover the query-string contract of get_application's `refresh`
+// argument: it must reach the ArgoCD REST API as a query parameter, and must be
+// absent when the caller omits it so that existing behaviour is unchanged.
+// global fetch is stubbed, so these remain hermetic (no network).
+
+const serverWithDefaults = () =>
+  createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry()
+  });
+
+// Run fn with a stubbed global fetch and return every URL it was called with.
+const captureFetchUrls = async (fn: () => Promise<void>): Promise<string[]> => {
+  const urls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+    urls.push(String(input));
+    return new Response(JSON.stringify({ metadata: { name: 'my-app' } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }) as typeof fetch;
+  try {
+    await fn();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  return urls;
+};
+
+test('get_application forwards refresh=hard as a query parameter', async () => {
+  const server = serverWithDefaults();
+  let result: { isError?: boolean; content: { text: string }[] } | undefined;
+
+  const urls = await captureFetchUrls(async () => {
+    result = await callTool(server, 'get_application', {
+      applicationName: 'my-app',
+      refresh: 'hard'
+    });
+  });
+
+  assert.equal(result?.isError, false);
+  assert.equal(urls.length, 1);
+  assert.equal(new URL(urls[0]).searchParams.get('refresh'), 'hard');
+});
+
+test('get_application forwards refresh=normal as a query parameter', async () => {
+  const server = serverWithDefaults();
+
+  const urls = await captureFetchUrls(async () => {
+    await callTool(server, 'get_application', {
+      applicationName: 'my-app',
+      refresh: 'normal'
+    });
+  });
+
+  assert.equal(urls.length, 1);
+  assert.equal(new URL(urls[0]).searchParams.get('refresh'), 'normal');
+});
+
+test('get_application omits the refresh query parameter when it is not requested', async () => {
+  const server = serverWithDefaults();
+
+  const urls = await captureFetchUrls(async () => {
+    await callTool(server, 'get_application', { applicationName: 'my-app' });
+  });
+
+  assert.equal(urls.length, 1);
+  assert.equal(new URL(urls[0]).searchParams.has('refresh'), false);
+});
+
+test('get_application sends appNamespace and refresh together', async () => {
+  const server = serverWithDefaults();
+
+  const urls = await captureFetchUrls(async () => {
+    await callTool(server, 'get_application', {
+      applicationName: 'my-app',
+      applicationNamespace: 'argocd',
+      refresh: 'hard'
+    });
+  });
+
+  assert.equal(urls.length, 1);
+  const params = new URL(urls[0]).searchParams;
+  assert.equal(params.get('appNamespace'), 'argocd');
+  assert.equal(params.get('refresh'), 'hard');
+});
