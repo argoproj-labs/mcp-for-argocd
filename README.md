@@ -257,12 +257,12 @@ The `http` and `sse` transports open a network listener that reaches every ArgoC
 | Inbound token | — | `MCP_AUTH_TOKEN` | unset | When set, every request must carry `Authorization: Bearer <token>`. |
 | Allowed `Host` | `--allowed-host-header` | — | loopback names | Extra hostname accepted in a request's `Host` header. Repeat per name. |
 | Allowed `Origin` | `--allowed-origin` | — | loopback origins | Extra browser origin accepted in a request's `Origin` header. Repeat per origin. |
-| External auth | `--allow-unauthenticated` | — | `false` | Allows a non-loopback bind with no token, when something in front already authenticates callers. |
-| Port | `--port` | — | `3000` | Which port to listen on. |
+| External auth | `--allow-unauthenticated` | `MCP_ALLOW_UNAUTHENTICATED` | `false` | Allows a non-loopback bind with no token, when something in front already authenticates callers. |
+| Port | `--port` | `MCP_PORT` | `3000` | Which port to listen on. |
 
 > `--bind-address` decides who may connect. `--allowed-host-header` only checks what an already-connected client claims. They are not a pair, and the second is not a firewall.
 
-Flags with no env var are passed as arguments, in a container too: `docker run <image> http --allow-unauthenticated`.
+A flag passed on the command line wins over its env var. Boolean env vars are enabled only by `true`. The env vars are for platforms that run the image's default command and only let you set the environment, such as AWS Bedrock AgentCore Runtime. Flags with no env var are passed as arguments, in a container too: `docker run <image> http --allowed-host-header mcp.internal.example.com`.
 
 Behaviour:
 
@@ -296,7 +296,7 @@ docker run -p 3000:3000 \
   argoprojlabs/mcp-for-argocd
 ```
 
-When the bind is widened and a proxy or mesh already authenticates callers, use `--allow-unauthenticated` instead of `MCP_AUTH_TOKEN`.
+When the bind is widened and a proxy or mesh already authenticates callers, use `--allow-unauthenticated` (or `MCP_ALLOW_UNAUTHENTICATED=true`) instead of `MCP_AUTH_TOKEN`.
 
 See [Operator notes](SECURITY.md#operator-notes-network-exposure) for the deployment caveats.
 
@@ -332,6 +332,16 @@ docker run -p 3000:3000 \
   -e ARGOCD_BASE_URL=<argocd_url> -e ARGOCD_API_TOKEN=<argocd_token> \
   -e MCP_BIND_ADDRESS=0.0.0.0 -e MCP_AUTH_TOKEN=<inbound_token> \
   argoprojlabs/mcp-for-argocd http --stateless
+```
+
+Where the command can't be overridden, set `MCP_STATELESS=true` instead of passing the flag:
+
+```bash
+docker run -p 8000:8000 \
+  -e ARGOCD_BASE_URL=<argocd_url> -e ARGOCD_API_TOKEN=<argocd_token> \
+  -e MCP_BIND_ADDRESS=0.0.0.0 -e MCP_AUTH_TOKEN=<inbound_token> \
+  -e MCP_PORT=8000 -e MCP_STATELESS=true \
+  argoprojlabs/mcp-for-argocd
 ```
 
 The image has an `ENTRYPOINT`, so overriding the command replaces only the arguments. Publishing a port is what makes the wider bind and the inbound token necessary here; see [Network Exposure](#network-exposure).
