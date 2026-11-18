@@ -291,6 +291,29 @@ export class Server extends McpServer {
           await client.updateApplication(applicationName, application as V1alpha1Application)
       );
       this.addJsonOutputTool(
+        'set_helm_parameters',
+        'set_helm_parameters upserts spec.source.helm.parameters by name. Parameters not listed are left unchanged, as are helm valueFiles and values. OpenAPI charts use the parameter name deploy.imageTag. This does not sync the application.',
+        {
+          applicationName: z.string(),
+          applicationNamespace: ApplicationNamespaceSchema.optional().describe(
+            'The namespace where the application is located. Required if application is not in the default namespace.'
+          ),
+          parameters: z
+            .array(
+              z.object({
+                name: z
+                  .string()
+                  .min(1)
+                  .describe('Helm parameter name, for example deploy.imageTag'),
+                value: z.string().min(1).describe('New value for that parameter')
+              })
+            )
+            .min(1)
+        },
+        async ({ applicationName, applicationNamespace, parameters }, client) =>
+          await client.setHelmParameters(applicationName, parameters, applicationNamespace)
+      );
+      this.addJsonOutputTool(
         'delete_application',
         'delete_application deletes application. Specify applicationNamespace if the application is in a non-default namespace to avoid permission errors.',
         {

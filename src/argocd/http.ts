@@ -115,6 +115,14 @@ export class HttpClient {
     return response;
   }
 
+  async patch<T, R>(url: string, params?: SearchParams, body?: T): Promise<HttpResponse<R>> {
+    const response = await this.request<R>(url, params, {
+      method: 'PATCH',
+      body: body ? JSON.stringify(body) : undefined
+    });
+    return response;
+  }
+
   async delete<R>(url: string, params?: SearchParams): Promise<HttpResponse<R>> {
     const response = await this.request<R>(url, params, {
       method: 'DELETE'
