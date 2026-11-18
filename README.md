@@ -255,6 +255,7 @@ The `http` and `sse` transports open a network listener that reaches every ArgoC
 |---|---|---|---|---|
 | Bind address | `--bind-address` | `MCP_BIND_ADDRESS` | `127.0.0.1` | Which address the listener accepts connections on. |
 | Inbound token | — | `MCP_AUTH_TOKEN` | unset | When set, every request must carry `Authorization: Bearer <token>`. |
+| OAuth (per-user SSO) | — | `MCP_OAUTH_ISSUER` and others | unset | `http` transport only. Every request must carry the user's own access token, and ArgoCD is called as that user. See [OAuth](#oauth-single-sign-on). |
 | Allowed `Host` | `--allowed-host-header` | — | loopback names | Extra hostname accepted in a request's `Host` header. Repeat per name. |
 | Allowed `Origin` | `--allowed-origin` | — | loopback origins | Extra browser origin accepted in a request's `Origin` header. Repeat per origin. |
 | External auth | `--allow-unauthenticated` | — | `false` | Allows a non-loopback bind with no token, when something in front already authenticates callers. |
@@ -266,7 +267,7 @@ Flags with no env var are passed as arguments, in a container too: `docker run <
 
 Behaviour:
 
-- Widening the bind requires `MCP_AUTH_TOKEN` or `--allow-unauthenticated`. Otherwise the server logs why and exits non-zero instead of starting exposed.
+- Widening the bind requires `MCP_AUTH_TOKEN`, [OAuth](#oauth-single-sign-on) or `--allow-unauthenticated`. Otherwise the server logs why and exits non-zero instead of starting exposed.
 - `Origin` is always checked, on scheme, host, and port. This is what stops a malicious web page, including one using DNS rebinding.
 - `Host` is checked on a loopback bind, or on any bind with at least one `--allowed-host-header`. Otherwise the hostname clients legitimately use is unknown, so the check is skipped and a warning is logged.
 - `GET /healthz` is exempt, so a kubelet probe still succeeds. It returns liveness only.
@@ -299,6 +300,65 @@ docker run -p 3000:3000 \
 When the bind is widened and a proxy or mesh already authenticates callers, use `--allow-unauthenticated` instead of `MCP_AUTH_TOKEN`.
 
 See [Operator notes](SECURITY.md#operator-notes-network-exposure) for the deployment caveats.
+
+### OAuth (single sign-on)
+
+With OAuth, each person signs in to your identity provider from their MCP client (Claude Code's `/mcp`, for example) and the server calls ArgoCD *as that person*: ArgoCD's own RBAC applies and its audit log names them. No ArgoCD token is configured on the server. It is available on the `http` transport.
+
+ArgoCD only trusts tokens from the one issuer in its `oidc.config`, and the MCP authorization spec forbids forwarding a client's token to another service. So the server does not pass the user's token on. It validates it, then exchanges it ([RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693)) at the identity provider for a token issued to ArgoCD's OIDC client for the same user, and calls ArgoCD with that.
+
+```
+MCP client ──sign in──► identity provider ──token (aud: MCP server)──► MCP client
+MCP client ──Bearer──► argocd-mcp ──token exchange (audience: ArgoCD's client)──► identity provider
+argocd-mcp ──Bearer (exchanged token)──► ArgoCD
+```
+
+| Env var | Required | Example | What it does |
+|---|---|---|---|
+| `MCP_OAUTH_ISSUER` | yes | `https://id.example.com/application/o/argocd-mcp/` | The issuer of the tokens clients present, exactly as in its discovery document, trailing slash included. Setting it enables OAuth. |
+| `MCP_OAUTH_AUDIENCE` | yes | `argocd-mcp` | The `aud` those tokens must carry. |
+| `MCP_PUBLIC_URL` | yes | `https://argocd-mcp.example.com/mcp` | The URL clients connect to. It is the resource the metadata names, so it must match exactly. A path prefix behind a proxy is not supported. |
+| `ARGOCD_TOKEN_EXCHANGE_AUDIENCE` | yes | `argocd` | Which client the exchanged token is for: ArgoCD's `clientID`. |
+| `ARGOCD_BASE_URL` | yes | `https://argocd.example.com` | The one ArgoCD instance user tokens are sent to. |
+| `MCP_OAUTH_SCOPES` | no | `openid profile email offline_access` | The scopes clients are told to ask for. `offline_access` gives them a refresh token. |
+| `ARGOCD_TOKEN_EXCHANGE_SCOPE` | no | `openid profile email` | The scopes asked for in the exchange. It must include whatever puts the `groups` claim ArgoCD's RBAC reads into the token. |
+| `ARGOCD_TOKEN_EXCHANGE_CLIENT_ID` | no | defaults to `MCP_OAUTH_AUDIENCE` | The client ID the exchange is requested under. |
+
+```bash
+export MCP_OAUTH_ISSUER=https://id.example.com/application/o/argocd-mcp/
+export MCP_OAUTH_AUDIENCE=argocd-mcp
+export MCP_PUBLIC_URL=https://argocd-mcp.example.com/mcp
+export ARGOCD_TOKEN_EXCHANGE_AUDIENCE=argocd
+export ARGOCD_BASE_URL=https://argocd.example.com
+node dist/index.js http --bind-address 0.0.0.0 --allowed-host-header argocd-mcp.example.com
+```
+
+Then, in Claude Code:
+
+```bash
+claude mcp add --transport http --client-id argocd-mcp argocd https://argocd-mcp.example.com/mcp
+```
+
+What the server does:
+
+- Serves [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728) metadata at `/.well-known/oauth-protected-resource/mcp`, naming the issuer. A request without a valid token gets `401` with a `WWW-Authenticate` header pointing there, which is how the client knows where to sign in.
+- Validates each token against the issuer's key set: signature (asymmetric algorithms only), issuer, audience, expiry, `sub`, and a `scope` claim, so ID tokens are refused. An expired token gets `401`, which is what makes clients refresh. A key set it cannot load gets `500`, not `401`, so an identity-provider outage does not send every client back to sign in.
+- Exchanges the token on the first tool call and keeps the result until 30 seconds before it expires. If ArgoCD answers `401` anyway, it exchanges once more and retries.
+- Ties each session to the user who opened it. Another user's session ID is treated as unknown. Each user holds at most 20 sessions.
+
+What it refuses, at startup:
+
+- A partial configuration, an issuer or public URL that is not `https` (plain `http` is accepted on loopback, for development), or a non-`https` `ARGOCD_BASE_URL`.
+- `MCP_AUTH_TOKEN`, `ARGOCD_API_TOKEN` or `ARGOCD_TOKEN_REGISTRY_PATH` alongside it, including from a `.env` file. Every call runs as a user, so there is no static token to fall back to.
+- The `stdio` and `sse` transports.
+
+And per call: the `x-argocd-base-url` and `x-argocd-api-token` headers are ignored, and an `argocdBaseUrl` tool argument other than `ARGOCD_BASE_URL` is an error, so a user's identity is only ever presented to the configured instance.
+
+The identity provider has to support the exchange, and register the MCP clients' redirect URIs on the client in `MCP_OAUTH_AUDIENCE`. For authentik (2026.8), that means:
+
+- A public OAuth2 provider for the MCP server, with the grant type `urn:ietf:params:oauth:grant-type:token-exchange` and the redirect URIs of the clients (for Claude Code, `http://localhost:<port>/callback`).
+- ArgoCD's provider listing it in `jwt_federation_providers`.
+- The exchange asking for `profile`, which carries `groups`. authentik does not carry the scope over from the token being exchanged.
 
 ### Read Only Mode
 

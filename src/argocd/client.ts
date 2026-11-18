@@ -11,17 +11,17 @@ import {
   V1alpha1ClusterList,
   V1alpha1AppProject
 } from '../types/argocd-types.js';
-import { HttpClient } from './http.js';
+import { HttpClient, type HttpClientOptions } from './http.js';
 
 export class ArgoCDClient {
   private baseUrl: string;
   private apiToken: string;
   private client: HttpClient;
 
-  constructor(baseUrl: string, apiToken: string) {
+  constructor(baseUrl: string, apiToken: string, options: HttpClientOptions = {}) {
     this.baseUrl = baseUrl;
     this.apiToken = apiToken;
-    this.client = new HttpClient(this.baseUrl, this.apiToken);
+    this.client = new HttpClient(this.baseUrl, this.apiToken, options);
   }
 
   public async listApplications(params?: { search?: string; limit?: number; offset?: number }) {

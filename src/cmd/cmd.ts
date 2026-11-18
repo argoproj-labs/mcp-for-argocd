@@ -7,6 +7,7 @@ import {
   type TransportOptions
 } from '../server/transport.js';
 import { DEFAULT_BIND_ADDRESS } from '../server/security.js';
+import { assertNoStaticCredentials, OAUTH_ENV, resolveOAuthConfig } from '../server/oauth.js';
 import { logger } from '../logging/logging.js';
 
 // Options shared by the two network transports. The inbound token is env-only:
@@ -90,6 +91,25 @@ const start = (run: () => void) => {
   }
 };
 
+// OAuth mode is implemented for the http transport only (stdio has no inbound
+// request to authenticate; the deprecated SSE transport is not wired for it).
+// Refuse rather than start without the authentication that was configured.
+const refuseOAuth = (transport: string) => {
+  if (resolveOAuthConfig()) {
+    throw new Error(
+      `${OAUTH_ENV.issuer} is set, but OAuth is only supported by the http transport, not ${transport}.`
+    );
+  }
+};
+
+// Read and check the OAuth configuration for the http transport. undefined when
+// it is not configured.
+const httpOAuth = () => {
+  const oauth = resolveOAuthConfig();
+  if (oauth) assertNoStaticCredentials();
+  return oauth;
+};
+
 export const cmd = () => {
   const exe = yargs(hideBin(process.argv));
 
@@ -97,11 +117,18 @@ export const cmd = () => {
     'stdio',
     'Start ArgoCD MCP server using stdio.',
     () => {},
-    () => connectStdioTransport()
+    () =>
+      start(() => {
+        refuseOAuth('stdio');
+        connectStdioTransport();
+      })
   );
 
   exe.command('sse', 'Start ArgoCD MCP server using SSE.', listenerOptions, (argv) =>
-    start(() => connectSSETransport(transportOptions(argv)))
+    start(() => {
+      refuseOAuth('sse');
+      connectSSETransport(transportOptions(argv));
+    })
   );
 
   exe.command(
@@ -114,7 +141,13 @@ export const cmd = () => {
         description: 'Run in stateless mode'
       }),
     (argv) =>
-      start(() => connectHttpTransport({ ...transportOptions(argv), stateless: argv.stateless }))
+      start(() =>
+        connectHttpTransport({
+          ...transportOptions(argv),
+          stateless: argv.stateless,
+          oauth: httpOAuth()
+        })
+      )
   );
 
   // Without strict(), a misspelled security flag ('--allowed-host') is silently
