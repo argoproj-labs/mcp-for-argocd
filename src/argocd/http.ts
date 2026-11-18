@@ -6,18 +6,50 @@ export interface HttpResponse<T> {
 
 type SearchParams = Record<string, string | number | boolean | undefined | null> | null;
 
+export type HttpClientOptions = {
+  // Called once when ArgoCD answers 401, for a token to retry the request with.
+  // Used for short-lived tokens obtained by token exchange: a cached one can be
+  // rejected (clock skew, key rotation) while still within its own lifetime.
+  // It receives the token ArgoCD rejected.
+  onUnauthorized?: (rejectedToken: string) => Promise<string | undefined>;
+};
+
 export class HttpClient {
   public readonly baseUrl: string;
-  public readonly apiToken: string;
-  public readonly headers: Record<string, string>;
+  // Not readonly: replaced by the one retry after a 401.
+  public apiToken: string;
+  private readonly onUnauthorized?: (rejectedToken: string) => Promise<string | undefined>;
 
-  constructor(baseUrl: string, apiToken: string) {
+  constructor(baseUrl: string, apiToken: string, options: HttpClientOptions = {}) {
     this.baseUrl = baseUrl;
     this.apiToken = apiToken;
-    this.headers = {
+    this.onUnauthorized = options.onUnauthorized;
+  }
+
+  public get headers(): Record<string, string> {
+    return {
       Authorization: `Bearer ${this.apiToken}`,
       'Content-Type': 'application/json'
     };
+  }
+
+  private async send(url: URL, init?: RequestInit): Promise<Response> {
+    const attempt = () => fetch(url, { ...init, headers: { ...init?.headers, ...this.headers } });
+    const response = await attempt();
+    if (response.status !== 401 || !this.onUnauthorized) return response;
+    let fresh: string | undefined;
+    try {
+      fresh = await this.onUnauthorized(this.apiToken);
+    } catch (error) {
+      // The replacement could not be obtained (e.g. the exchange was refused); that
+      // error says more than ArgoCD's 401 does.
+      await response.body?.cancel();
+      throw error;
+    }
+    if (!fresh || fresh === this.apiToken) return response;
+    await response.body?.cancel();
+    this.apiToken = fresh;
+    return attempt();
   }
 
   private async request<R>(
@@ -31,10 +63,7 @@ export class HttpClient {
         urlObject.searchParams.set(key, value?.toString() || '');
       });
     }
-    const response = await fetch(urlObject, {
-      ...init,
-      headers: { ...init?.headers, ...this.headers }
-    });
+    const response = await this.send(urlObject, init);
     const body = await response.json();
     return {
       status: response.status,
@@ -55,10 +84,7 @@ export class HttpClient {
         urlObject.searchParams.set(key, value?.toString() || '');
       });
     }
-    const response = await fetch(urlObject, {
-      ...init,
-      headers: { ...init?.headers, ...this.headers }
-    });
+    const response = await this.send(urlObject, init);
     const reader = response.body?.getReader();
     if (!reader) {
       throw new Error('response body is not readable');
