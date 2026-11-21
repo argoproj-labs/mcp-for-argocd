@@ -175,3 +175,23 @@ test('with no default token, an overridden URL still resolves only from the regi
   assert.equal(result.isError, true);
   assert.match(textOf(result), /Missing required ArgoCD API token/);
 });
+
+test('sync window tools are registered, including in read-only mode', () => {
+  const previous = process.env.MCP_READ_ONLY;
+  process.env.MCP_READ_ONLY = 'true';
+  try {
+    const server = createServer({
+      argocdBaseUrl: DEFAULT_BASE_URL,
+      argocdApiToken: DEFAULT_TOKEN,
+      tokenRegistry: new TokenRegistry()
+    });
+    const registered = (server as unknown as { _registeredTools: Record<string, unknown> })
+      ._registeredTools;
+    assert.ok(registered['get_application_sync_windows']);
+    assert.ok(registered['get_appproject_sync_windows']);
+    assert.equal(registered['create_application'], undefined);
+  } finally {
+    if (previous === undefined) delete process.env.MCP_READ_ONLY;
+    else process.env.MCP_READ_ONLY = previous;
+  }
+});
