@@ -42,10 +42,12 @@ The server provides the following ArgoCD management tools:
 
 ### Project Management
 - `get_appproject`: Get detailed information about a specific AppProject (project)
+- `get_appproject_sync_windows`: Get the sync windows currently in effect for an AppProject
 
 ### Application Management
 - `list_applications`: List and filter all applications
 - `get_application`: Get detailed information about a specific application
+- `get_application_sync_windows`: Get the sync windows assigned to and active for an application, and whether a sync is allowed now (`canSync`)
 - `get_application_events`: Get events for a specific application
 - `create_application`: Create a new application
 - `update_application`: Update an existing application

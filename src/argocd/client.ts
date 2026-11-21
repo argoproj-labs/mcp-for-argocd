@@ -9,9 +9,18 @@ import {
   V1alpha1ResourceResult,
   V1alpha1ApplicationResourceResult,
   V1alpha1ClusterList,
-  V1alpha1AppProject
+  V1alpha1AppProject,
+  ApplicationSyncWindowsResponse,
+  ProjectSyncWindowsResponse
 } from '../types/argocd-types.js';
 import { HttpClient } from './http.js';
+
+const assertOk = (status: number, body: unknown, what: string) => {
+  if (status < 200 || status >= 300) {
+    const message = (body as { message?: string } | null)?.message;
+    throw new Error(`Failed to ${what}: HTTP ${status}${message ? ` - ${message}` : ''}`);
+  }
+};
 
 export class ArgoCDClient {
   private baseUrl: string;
@@ -92,6 +101,38 @@ export class ArgoCDClient {
   public async getAppProject(projectName: string) {
     const { body } = await this.client.get<V1alpha1AppProject>(`/api/v1/projects/${projectName}`);
     return body;
+  }
+
+  // The sync windows endpoints omit empty fields from their JSON, so a project or
+  // application without windows comes back as `{}`. Normalize that to explicit empty
+  // lists. A non-2xx response is an error, never "no windows": http.ts does not throw
+  // on error statuses, so check here before normalizing.
+  public async getApplicationSyncWindows(
+    applicationName: string,
+    options?: { appNamespace?: string; project?: string }
+  ) {
+    const queryParams: Record<string, string> = {};
+    if (options?.appNamespace) queryParams.appNamespace = options.appNamespace;
+    if (options?.project) queryParams.project = options.project;
+
+    const { status, body } = await this.client.get<ApplicationSyncWindowsResponse>(
+      `/api/v1/applications/${encodeURIComponent(applicationName)}/syncwindows`,
+      Object.keys(queryParams).length > 0 ? queryParams : undefined
+    );
+    assertOk(status, body, `get sync windows for application "${applicationName}"`);
+    return {
+      ...body,
+      activeWindows: body.activeWindows ?? [],
+      assignedWindows: body.assignedWindows ?? []
+    };
+  }
+
+  public async getAppProjectSyncWindows(projectName: string) {
+    const { status, body } = await this.client.get<ProjectSyncWindowsResponse>(
+      `/api/v1/projects/${encodeURIComponent(projectName)}/syncwindows`
+    );
+    assertOk(status, body, `get sync windows for project "${projectName}"`);
+    return { ...body, windows: body.windows ?? [] };
   }
 
   public async createApplication(application: V1alpha1Application) {
