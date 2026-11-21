@@ -133,14 +133,16 @@ export class Server extends McpServer {
     );
     this.addJsonOutputTool(
       'get_application_sync_windows',
-      'get_application_sync_windows returns the sync windows that apply to an application: the windows assigned to it, the ones currently active, and canSync, which says whether a sync is allowed right now. Use it to find out why a sync is blocked. Optionally specify the application namespace.',
+      'get_application_sync_windows returns the sync windows that apply to an application: the windows assigned to it, the ones currently active, and canSync, which says whether a sync is allowed right now. Use it to find out why a sync is blocked. Optionally specify the application namespace and the project the application belongs to.',
       {
         applicationName: z.string(),
-        applicationNamespace: ApplicationNamespaceSchema.optional()
+        applicationNamespace: ApplicationNamespaceSchema.optional(),
+        project: z.string().optional().describe('The ArgoCD AppProject of the application.')
       },
-      async ({ applicationName, applicationNamespace }, client) =>
+      async ({ applicationName, applicationNamespace, project }, client) =>
         await client.getApplicationSyncWindows(applicationName, {
-          appNamespace: applicationNamespace
+          appNamespace: applicationNamespace,
+          project
         })
     );
     this.addJsonOutputTool(

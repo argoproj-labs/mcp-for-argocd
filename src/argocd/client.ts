@@ -20,6 +20,10 @@ const assertOk = (status: number, body: unknown, what: string) => {
     const message = (body as { message?: string } | null)?.message;
     throw new Error(`Failed to ${what}: HTTP ${status}${message ? ` - ${message}` : ''}`);
   }
+  // `{}` is a valid "no windows" answer, but a null body is malformed, not empty.
+  if (body === null || typeof body !== 'object') {
+    throw new Error(`Failed to ${what}: unexpected empty response body`);
+  }
 };
 
 export class ArgoCDClient {

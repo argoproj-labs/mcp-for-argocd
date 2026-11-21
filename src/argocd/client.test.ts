@@ -81,3 +81,10 @@ test('sync window reads fail on an error status instead of reporting no windows'
   await assert.rejects(client.getAppProjectSyncWindows('default'), /HTTP 403 - permission denied/);
   await assert.rejects(client.getApplicationSyncWindows('guestbook'), /HTTP 403/);
 });
+
+test('sync window reads reject a null body on 200 instead of throwing a TypeError', async () => {
+  const { client } = await startArgoCD(200, null);
+
+  await assert.rejects(client.getAppProjectSyncWindows('default'), /unexpected empty response/);
+  await assert.rejects(client.getApplicationSyncWindows('guestbook'), /unexpected empty response/);
+});
