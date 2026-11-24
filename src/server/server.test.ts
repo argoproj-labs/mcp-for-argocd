@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { createServer as createHttpServer } from 'node:http';
+import { once } from 'node:events';
+import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import { createServer } from './server.js';
 import { TokenRegistry } from './tokenRegistry.js';
@@ -43,6 +46,81 @@ const callTool = async (
 
 const textOf = (result: { content: { text: string }[] }): string =>
   result.content.map((c) => c.text).join('\n');
+
+test('sync forwards the Argo API option envelope and pinned multi-source revisions', async (t) => {
+  const requests: { url?: string; method?: string; body: unknown }[] = [];
+  const api = createHttpServer(async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    requests.push({ url: req.url, method: req.method, body: JSON.parse(body) });
+    res.setHeader('Content-Type', 'application/json');
+    res.end('{}');
+  });
+  api.listen(0, '127.0.0.1');
+  await once(api, 'listening');
+  t.after(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        api.close((error) => (error ? reject(error) : resolve()));
+        api.closeAllConnections();
+      })
+  );
+  const server = createServer({
+    argocdBaseUrl: `http://127.0.0.1:${(api.address() as AddressInfo).port}`,
+    argocdApiToken: 'test-token'
+  });
+  const result = await callTool(server, 'sync_application', {
+    applicationName: 'example',
+    applicationNamespace: 'argocd',
+    dryRun: false,
+    prune: false,
+    revisions: ['chart-tag', 'reviewed-commit'],
+    sourcePositions: [1, 3],
+    syncOptions: ['ServerSideApply=true']
+  });
+  assert.ok(!result.isError, textOf(result));
+  assert.deepEqual(requests, [
+    {
+      url: '/api/v1/applications/example/sync',
+      method: 'POST',
+      body: {
+        appNamespace: 'argocd',
+        dryRun: false,
+        prune: false,
+        revisions: ['chart-tag', 'reviewed-commit'],
+        sourcePositions: [1, 3],
+        syncOptions: { items: ['ServerSideApply=true'] }
+      }
+    }
+  ]);
+
+  const legacy = await callTool(server, 'sync_application', {
+    applicationName: 'example',
+    revision: 'single-source-commit',
+    prune: true
+  });
+  assert.ok(!legacy.isError, textOf(legacy));
+  assert.deepEqual(requests[1].body, { revision: 'single-source-commit', prune: true });
+
+  for (const args of [
+    { revisions: ['commit'] },
+    { sourcePositions: [1] },
+    { revisions: [], sourcePositions: [] },
+    { revisions: ['commit'], sourcePositions: [1, 2] },
+    { revisions: ['a', 'b'], sourcePositions: [1, 1] },
+    { revisions: ['commit'], sourcePositions: [0] },
+    { revisions: ['commit'], sourcePositions: [1.5] },
+    { revision: 'single', revisions: ['commit'], sourcePositions: [1] }
+  ]) {
+    const invalid = await callTool(server, 'sync_application', {
+      applicationName: 'example',
+      ...args
+    });
+    assert.equal(invalid.isError, true);
+    assert.match(textOf(invalid), /sourcePositions/);
+  }
+  assert.equal(requests.length, 2, 'invalid source selection never reaches the Argo API');
+});
 
 test('overridden base URL with no registry entry does NOT receive the default token', async () => {
   const server = createServer({

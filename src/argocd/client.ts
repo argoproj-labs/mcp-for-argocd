@@ -146,10 +146,28 @@ export class ArgoCDClient {
       dryRun?: boolean;
       prune?: boolean;
       revision?: string;
+      revisions?: string[];
+      sourcePositions?: number[];
       syncOptions?: string[];
     }
   ) {
-    const syncRequest: Record<string, string | boolean | string[]> = {};
+    if (options?.revisions !== undefined || options?.sourcePositions !== undefined) {
+      if (
+        options.revision !== undefined ||
+        !options.revisions?.length ||
+        options.revisions.length !== options.sourcePositions?.length ||
+        options.sourcePositions.some((position) => !Number.isInteger(position) || position < 1) ||
+        new Set(options.sourcePositions).size !== options.sourcePositions.length
+      ) {
+        throw new Error(
+          'Use equally sized, non-empty revisions and unique positive sourcePositions without revision'
+        );
+      }
+    }
+    const syncRequest: Record<
+      string,
+      string | boolean | string[] | number[] | { items: string[] }
+    > = {};
 
     if (options?.appNamespace) {
       syncRequest.appNamespace = options.appNamespace;
@@ -164,7 +182,11 @@ export class ArgoCDClient {
       syncRequest.revision = options.revision;
     }
     if (options?.syncOptions) {
-      syncRequest.syncOptions = options.syncOptions;
+      syncRequest.syncOptions = { items: options.syncOptions };
+    }
+    if (options?.revisions) {
+      syncRequest.revisions = options.revisions;
+      syncRequest.sourcePositions = options.sourcePositions!;
     }
 
     const { body } = await this.client.post<V1alpha1Application, V1alpha1Application>(
