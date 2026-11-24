@@ -9,13 +9,28 @@ import {
 import { DEFAULT_BIND_ADDRESS } from '../server/security.js';
 import { logger } from '../logging/logging.js';
 
+// Some platforms run the image's default command and only let the operator set
+// environment variables (AWS Bedrock AgentCore Runtime has no command override),
+// so these flags also take their default from the environment. A flag on the
+// command line still wins.
+export const envBoolean = (value: string | undefined): boolean =>
+  String(value ?? '')
+    .trim()
+    .toLowerCase() === 'true';
+
+// An unset or blank MCP_PORT keeps 3000. Anything else goes through the port
+// check below, so 'abc' fails at startup instead of falling back.
+export const envPort = (value: string | undefined): number =>
+  value && value.trim() ? Number(value.trim()) : 3000;
+
 // Options shared by the two network transports. The inbound token is env-only:
 // argv is readable by every user on the machine via `ps`.
-const listenerOptions = <T>(yargs: Argv<T>) =>
+export const listenerOptions = <T>(yargs: Argv<T>) =>
   yargs
     .option('port', {
       type: 'number',
-      default: 3000
+      default: envPort(process.env.MCP_PORT),
+      description: 'Port to listen on. Defaults to MCP_PORT, or 3000.'
     })
     // This decides who may connect. --allowed-host-header only checks what an
     // already-connected client claims, which is why they are not named as a pair.
@@ -45,9 +60,9 @@ const listenerOptions = <T>(yargs: Argv<T>) =>
     .nargs('allowed-origin', 1)
     .option('allow-unauthenticated', {
       type: 'boolean',
-      default: false,
+      default: envBoolean(process.env.MCP_ALLOW_UNAUTHENTICATED),
       description:
-        'Permit a non-loopback bind without MCP_AUTH_TOKEN. Only use this when the listener is already protected by an external layer.'
+        'Permit a non-loopback bind without MCP_AUTH_TOKEN. Only use this when the listener is already protected by an external layer. Also set by MCP_ALLOW_UNAUTHENTICATED=true.'
     })
     // Without this, '--port abc' reaches the Origin allow-list builder as NaN and
     // fails there as a bare 'Invalid URL'. Port 0 is rejected because that list is
@@ -57,7 +72,9 @@ const listenerOptions = <T>(yargs: Argv<T>) =>
         // yargs has already coerced a non-numeric value to NaN, so the original
         // text is gone by now.
         const shown = Number.isNaN(port) ? 'not a number' : port;
-        throw new Error(`Invalid --port value: ${shown}. Expected an integer between 1 and 65535.`);
+        throw new Error(
+          `Invalid --port (or MCP_PORT) value: ${shown}. Expected an integer between 1 and 65535.`
+        );
       }
       return true;
     });
@@ -69,6 +86,13 @@ type ListenerArgv = {
   allowedOrigin: string[];
   allowUnauthenticated: boolean;
 };
+
+export const httpOptions = <T>(yargs: Argv<T>) =>
+  listenerOptions(yargs).option('stateless', {
+    type: 'boolean',
+    default: envBoolean(process.env.MCP_STATELESS),
+    description: 'Run in stateless mode. Also set by MCP_STATELESS=true.'
+  });
 
 const transportOptions = (argv: ListenerArgv): TransportOptions => ({
   port: argv.port,
@@ -104,17 +128,8 @@ export const cmd = () => {
     start(() => connectSSETransport(transportOptions(argv)))
   );
 
-  exe.command(
-    'http',
-    'Start ArgoCD MCP server using Http Stream.',
-    (yargs) =>
-      listenerOptions(yargs).option('stateless', {
-        type: 'boolean',
-        default: false,
-        description: 'Run in stateless mode'
-      }),
-    (argv) =>
-      start(() => connectHttpTransport({ ...transportOptions(argv), stateless: argv.stateless }))
+  exe.command('http', 'Start ArgoCD MCP server using Http Stream.', httpOptions, (argv) =>
+    start(() => connectHttpTransport({ ...transportOptions(argv), stateless: argv.stateless }))
   );
 
   // Without strict(), a misspelled security flag ('--allowed-host') is silently
