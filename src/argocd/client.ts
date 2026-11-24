@@ -80,11 +80,18 @@ export class ArgoCDClient {
     return body;
   }
 
-  public async getApplication(applicationName: string, appNamespace?: string) {
-    const queryParams = appNamespace ? { appNamespace } : undefined;
+  public async getApplication(
+    applicationName: string,
+    appNamespace?: string,
+    refresh?: 'normal' | 'hard'
+  ) {
+    const queryParams = {
+      ...(appNamespace && { appNamespace }),
+      ...(refresh && { refresh })
+    };
     const { body } = await this.client.get<V1alpha1Application>(
       `/api/v1/applications/${applicationName}`,
-      queryParams
+      Object.keys(queryParams).length > 0 ? queryParams : undefined
     );
     return body;
   }
