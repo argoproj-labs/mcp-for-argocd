@@ -12,16 +12,15 @@ import {
   V1alpha1AppProject
 } from '../types/argocd-types.js';
 import { HttpClient } from './http.js';
+import type { TokenProvider } from './tokenProvider.js';
 
 export class ArgoCDClient {
   private baseUrl: string;
-  private apiToken: string;
   private client: HttpClient;
 
-  constructor(baseUrl: string, apiToken: string) {
+  constructor(baseUrl: string, tokenProvider: TokenProvider) {
     this.baseUrl = baseUrl;
-    this.apiToken = apiToken;
-    this.client = new HttpClient(this.baseUrl, this.apiToken);
+    this.client = new HttpClient(this.baseUrl, tokenProvider);
   }
 
   public async listApplications(params?: { search?: string; limit?: number; offset?: number }) {

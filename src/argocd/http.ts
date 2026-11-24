@@ -1,3 +1,5 @@
+import type { TokenProvider } from './tokenProvider.js';
+
 export interface HttpResponse<T> {
   status: number;
   headers: Headers;
@@ -8,16 +10,35 @@ type SearchParams = Record<string, string | number | boolean | undefined | null>
 
 export class HttpClient {
   public readonly baseUrl: string;
-  public readonly apiToken: string;
-  public readonly headers: Record<string, string>;
+  public readonly tokenProvider: TokenProvider;
 
-  constructor(baseUrl: string, apiToken: string) {
+  constructor(baseUrl: string, tokenProvider: TokenProvider) {
     this.baseUrl = baseUrl;
-    this.apiToken = apiToken;
-    this.headers = {
-      Authorization: `Bearer ${this.apiToken}`,
-      'Content-Type': 'application/json'
-    };
+    this.tokenProvider = tokenProvider;
+  }
+
+  // Send a request with the bearer token resolved from the provider at call
+  // time, so a long-lived client always carries the provider's current token.
+  //
+  // If ArgoCD rejects the token (401) and the provider can produce a fresh one,
+  // the cached token is dropped and the request is sent once more. A 401 means
+  // the request was rejected before being acted on, so the retry is safe for
+  // mutating requests too. A second 401 is returned to the caller as-is.
+  private async fetchWithAuth(url: URL, init?: RequestInit): Promise<Response> {
+    const send = async () =>
+      fetch(url, {
+        ...init,
+        headers: {
+          ...init?.headers,
+          Authorization: `Bearer ${await this.tokenProvider.getToken()}`,
+          'Content-Type': 'application/json'
+        }
+      });
+    const response = await send();
+    if (response.status !== 401 || !this.tokenProvider.invalidate()) {
+      return response;
+    }
+    return send();
   }
 
   private async request<R>(
@@ -31,10 +52,7 @@ export class HttpClient {
         urlObject.searchParams.set(key, value?.toString() || '');
       });
     }
-    const response = await fetch(urlObject, {
-      ...init,
-      headers: { ...init?.headers, ...this.headers }
-    });
+    const response = await this.fetchWithAuth(urlObject, init);
     const body = await response.json();
     return {
       status: response.status,
@@ -55,10 +73,7 @@ export class HttpClient {
         urlObject.searchParams.set(key, value?.toString() || '');
       });
     }
-    const response = await fetch(urlObject, {
-      ...init,
-      headers: { ...init?.headers, ...this.headers }
-    });
+    const response = await this.fetchWithAuth(urlObject, init);
     const reader = response.body?.getReader();
     if (!reader) {
       throw new Error('response body is not readable');

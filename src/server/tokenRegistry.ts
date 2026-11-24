@@ -1,22 +1,37 @@
 import { readFileSync } from 'node:fs';
 import { logger } from '../logging/logging.js';
+import {
+  CommandTokenProvider,
+  StaticTokenProvider,
+  type TokenProvider
+} from '../argocd/tokenProvider.js';
 
-// A read-only registry that maps an ArgoCD base URL to the API token that
+// A read-only registry that maps an ArgoCD base URL to the credential that
 // should be used for it. It lets a single server target multiple ArgoCD
-// instances — each with its own token — without the token ever being passed in
-// a tool-call payload: the caller supplies only the (non-secret) base URL and
-// the server pairs it with the configured token.
+// instances — each with its own credential — without the token ever being
+// passed in a tool-call payload: the caller supplies only the (non-secret) base
+// URL and the server pairs it with the configured credential.
 //
 // Configuration source: a JSON file whose path is given by the
 // ARGOCD_TOKEN_REGISTRY_PATH environment variable. The tokens are secrets, so
 // they are read from a file (e.g. a mounted Kubernetes secret) rather than an
 // env var, keeping them out of the process environment, crash dumps, and child
-// process inheritance. The file contains a JSON array of { baseUrl, token }
-// entries, e.g.
+// process inheritance. The file contains a JSON array of entries, each with a
+// baseUrl and exactly one of:
+//
+//   token        — a static bearer token, used as-is;
+//   tokenCommand — an executable + arguments that print a fresh token to
+//                  stdout. Run without a shell, cached for tokenTTLSeconds
+//                  and re-run when the cache expires or ArgoCD rejects the
+//                  token. This is how short-lived credentials (GCP IAP
+//                  identity tokens, SSO sessions, Vault leases, …) are
+//                  supported without cloud-specific code in the server.
 //
 //   [
 //     {"baseUrl":"https://argo-a.example.com","token":"<token-a>"},
-//     {"baseUrl":"https://argo-b.example.com","token":"<token-b>"}
+//     {"baseUrl":"https://argo-b.example.com",
+//      "tokenCommand":["gcloud","auth","print-identity-token","--audiences=<client-id>"],
+//      "tokenTTLSeconds":2700,"tokenCommandTimeoutSeconds":10}
 //   ]
 //
 // Base URLs are normalized (lowercased host, trailing slashes stripped) so
@@ -24,32 +39,33 @@ import { logger } from '../logging/logging.js';
 // value don't cause a lookup miss.
 export type TokenRegistryEntry = {
   baseUrl: string;
-  token: string;
+  token?: string;
+  tokenCommand?: string[];
+  tokenTTLSeconds?: number;
+  tokenCommandTimeoutSeconds?: number;
 };
 
 export class TokenRegistry {
-  private tokensByBaseUrl = new Map<string, string>();
+  private providersByBaseUrl = new Map<string, TokenProvider>();
 
   constructor(entries: TokenRegistryEntry[] = []) {
     for (const entry of entries) {
-      if (!entry.baseUrl || !entry.token) {
-        // Fail closed: a missing baseUrl/token is a misconfigured credential,
-        // not something to silently skip. Don't include the token in the error.
-        throw new Error('ArgoCD token registry entry is missing baseUrl or token');
-      }
-      this.tokensByBaseUrl.set(TokenRegistry.normalize(entry.baseUrl), entry.token);
+      // Validate (and build the provider) before touching baseUrl.
+      const provider = TokenRegistry.providerFor(entry);
+      this.providersByBaseUrl.set(TokenRegistry.normalize(entry.baseUrl), provider);
     }
   }
 
-  // Returns the configured token for the given base URL, or undefined when the
-  // base URL is not registered.
-  public getToken(baseUrl: string): string | undefined {
+  // Returns the configured token provider for the given base URL, or undefined
+  // when the base URL is not registered. The same instance is returned on every
+  // lookup: it owns the token cache for command-backed entries.
+  public getProvider(baseUrl: string): TokenProvider | undefined {
     if (!baseUrl) return undefined;
-    return this.tokensByBaseUrl.get(TokenRegistry.normalize(baseUrl));
+    return this.providersByBaseUrl.get(TokenRegistry.normalize(baseUrl));
   }
 
   public getSize(): number {
-    return this.tokensByBaseUrl.size;
+    return this.providersByBaseUrl.size;
   }
 
   // Normalize a base URL for stable lookups: lowercase the scheme+host and drop
@@ -65,6 +81,45 @@ export class TokenRegistry {
       return `${origin}${path}`;
     } catch {
       return trimmed.replace(/\/+$/, '');
+    }
+  }
+
+  // Validate one entry and build its provider. Fails closed: a malformed entry
+  // is a misconfigured credential, not something to silently skip. Error
+  // messages name the base URL (not secret) but never a token value.
+  private static providerFor(entry: TokenRegistryEntry): TokenProvider {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new Error('ArgoCD token registry entry must be an object');
+    }
+    if (!entry.baseUrl) {
+      throw new Error('ArgoCD token registry entry is missing baseUrl');
+    }
+    const where = `for "${entry.baseUrl}"`;
+    const hasToken = Boolean(entry.token);
+    const hasCommand = entry.tokenCommand !== undefined;
+    if (hasToken === hasCommand) {
+      throw new Error(
+        `ArgoCD token registry entry ${where} must specify exactly one of "token" or "tokenCommand"`
+      );
+    }
+    if (hasToken) {
+      if (entry.tokenTTLSeconds !== undefined || entry.tokenCommandTimeoutSeconds !== undefined) {
+        throw new Error(
+          `ArgoCD token registry entry ${where}: "tokenTTLSeconds" and "tokenCommandTimeoutSeconds" are only valid with "tokenCommand"`
+        );
+      }
+      return new StaticTokenProvider(entry.token as string);
+    }
+    try {
+      return new CommandTokenProvider({
+        command: entry.tokenCommand as string[],
+        ttlSeconds: entry.tokenTTLSeconds,
+        timeoutSeconds: entry.tokenCommandTimeoutSeconds
+      });
+    } catch (error) {
+      throw new Error(
+        `ArgoCD token registry entry ${where}: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 }

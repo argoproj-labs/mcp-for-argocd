@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from './server.js';
 import { TokenRegistry } from './tokenRegistry.js';
+import type { HttpClient } from '../argocd/http.js';
 
 // These tests exercise the per-call token-resolution boundary in resolveClient
 // via the registered tool handlers. The security-critical invariant is:
@@ -44,6 +45,20 @@ const callTool = async (
 const textOf = (result: { content: { text: string }[] }): string =>
   result.content.map((c) => c.text).join('\n');
 
+// Resolve the client the server would use for a base URL and return the token
+// its provider yields, without sending any request.
+const resolveClient = (server: ReturnType<typeof createServer>, argocdBaseUrl: string) =>
+  (
+    server as unknown as {
+      resolveClient: (a: { argocdBaseUrl?: string }) => { client: HttpClient };
+    }
+  ).resolveClient({ argocdBaseUrl });
+
+const resolvedToken = (
+  server: ReturnType<typeof createServer>,
+  argocdBaseUrl: string
+): Promise<string> => resolveClient(server, argocdBaseUrl).client.tokenProvider.getToken();
+
 test('overridden base URL with no registry entry does NOT receive the default token', async () => {
   const server = createServer({
     argocdBaseUrl: DEFAULT_BASE_URL,
@@ -70,14 +85,10 @@ test('overridden base URL with a registry entry uses the registry token, not the
 
   // resolveClient should succeed and pair EVIL_BASE_URL with 'registered-token'
   // (not DEFAULT_TOKEN). We assert on the cached client built for this base URL.
-  const client = (
-    server as unknown as {
-      resolveClient: (a: { argocdBaseUrl?: string }) => unknown;
-    }
-  ).resolveClient({ argocdBaseUrl: EVIL_BASE_URL }) as { client: { apiToken: string } };
+  const token = await resolvedToken(server, EVIL_BASE_URL);
 
-  assert.equal(client.client.apiToken, 'registered-token');
-  assert.notEqual(client.client.apiToken, DEFAULT_TOKEN);
+  assert.equal(token, 'registered-token');
+  assert.notEqual(token, DEFAULT_TOKEN);
 });
 
 test('default base URL uses the default token', async () => {
@@ -87,13 +98,7 @@ test('default base URL uses the default token', async () => {
     tokenRegistry: new TokenRegistry()
   });
 
-  const client = (
-    server as unknown as {
-      resolveClient: (a: { argocdBaseUrl?: string }) => unknown;
-    }
-  ).resolveClient({ argocdBaseUrl: DEFAULT_BASE_URL }) as { client: { apiToken: string } };
-
-  assert.equal(client.client.apiToken, DEFAULT_TOKEN);
+  assert.equal(await resolvedToken(server, DEFAULT_BASE_URL), DEFAULT_TOKEN);
 });
 
 test('default base URL match is normalized (trailing slash / case)', async () => {
@@ -105,15 +110,7 @@ test('default base URL match is normalized (trailing slash / case)', async () =>
 
   // Same host, different formatting — must still be treated as the default URL
   // and receive the default token.
-  const client = (
-    server as unknown as {
-      resolveClient: (a: { argocdBaseUrl?: string }) => unknown;
-    }
-  ).resolveClient({ argocdBaseUrl: `${DEFAULT_BASE_URL.toUpperCase()}/` }) as {
-    client: { apiToken: string };
-  };
-
-  assert.equal(client.client.apiToken, DEFAULT_TOKEN);
+  assert.equal(await resolvedToken(server, `${DEFAULT_BASE_URL.toUpperCase()}/`), DEFAULT_TOKEN);
 });
 
 test('overriding argocdBaseUrl to the default instance reuses the session token (registry present)', async () => {
@@ -130,15 +127,7 @@ test('overriding argocdBaseUrl to the default instance reuses the session token 
     tokenRegistry: registry
   });
 
-  const client = (
-    server as unknown as {
-      resolveClient: (a: { argocdBaseUrl?: string }) => unknown;
-    }
-  ).resolveClient({ argocdBaseUrl: `${DEFAULT_BASE_URL.toUpperCase()}/` }) as {
-    client: { apiToken: string };
-  };
-
-  assert.equal(client.client.apiToken, DEFAULT_TOKEN);
+  assert.equal(await resolvedToken(server, `${DEFAULT_BASE_URL.toUpperCase()}/`), DEFAULT_TOKEN);
 });
 
 test('overriding argocdBaseUrl to a different instance with no registry entry sends no request', async () => {
@@ -174,4 +163,80 @@ test('with no default token, an overridden URL still resolves only from the regi
   const result = await callTool(server, 'list_applications', { argocdBaseUrl: EVIL_BASE_URL });
   assert.equal(result.isError, true);
   assert.match(textOf(result), /Missing required ArgoCD API token/);
+});
+
+// --- Command-backed registry entries -------------------------------------
+
+const commandPrinting = (token: string): string[] => [
+  process.execPath,
+  '-e',
+  `process.stdout.write(${JSON.stringify(token)})`
+];
+
+test('a registry entry with tokenCommand resolves its token by running the command', async () => {
+  const registry = new TokenRegistry([
+    { baseUrl: OTHER_BASE_URL, tokenCommand: commandPrinting('command-token') }
+  ]);
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: registry
+  });
+
+  assert.equal(await resolvedToken(server, OTHER_BASE_URL), 'command-token');
+});
+
+test('the default base URL falls back to a tokenCommand registry entry in a tokenless session', async () => {
+  const registry = new TokenRegistry([
+    { baseUrl: DEFAULT_BASE_URL, tokenCommand: commandPrinting('command-token') }
+  ]);
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: '',
+    tokenRegistry: registry
+  });
+
+  assert.equal(await resolvedToken(server, DEFAULT_BASE_URL), 'command-token');
+});
+
+test('repeated calls for the same base URL reuse one client (and so one token cache)', () => {
+  // The provider owns the cache; if the server rebuilt the client per call the
+  // command would be re-run for every tool call.
+  const registry = new TokenRegistry([
+    { baseUrl: OTHER_BASE_URL, tokenCommand: commandPrinting('command-token') }
+  ]);
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: registry
+  });
+
+  assert.equal(
+    resolveClient(server, OTHER_BASE_URL),
+    resolveClient(server, `${OTHER_BASE_URL.toUpperCase()}/`)
+  );
+});
+
+test('a failing tokenCommand surfaces as a tool error naming the command, not a crash', async () => {
+  const registry = new TokenRegistry([
+    {
+      baseUrl: OTHER_BASE_URL,
+      tokenCommand: [
+        process.execPath,
+        '-e',
+        `process.stderr.write('run login first'); process.exit(2)`
+      ]
+    }
+  ]);
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: registry
+  });
+
+  const result = await callTool(server, 'list_applications', { argocdBaseUrl: OTHER_BASE_URL });
+
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /exited with code 2/);
+  assert.match(textOf(result), /run login first/);
 });
