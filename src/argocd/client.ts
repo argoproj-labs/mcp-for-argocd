@@ -24,11 +24,28 @@ export class ArgoCDClient {
     this.client = new HttpClient(this.baseUrl, this.apiToken);
   }
 
+  // Sent as the `fields` query parameter so Argo CD omits heavy fields server-side. Argo CD < 2.6
+  // applies a generic field filter; 2.6+ honours only an allow-listed set of keys and silently
+  // drops others. `status.sync.revision` is honoured only from 3.5 (earlier, `status.sync` carries
+  // only `status`). Use `items.spec`, never `items.spec.*`: sub-keys exist only from 3.5, and
+  // sending both makes 3.5 fail. Client-side stripping below still trims spec.
+  private static readonly LIST_APPLICATIONS_FIELDS = [
+    'items.metadata.name',
+    'items.metadata.namespace',
+    'items.metadata.labels',
+    'items.metadata.creationTimestamp',
+    'items.spec',
+    'items.status.sync.status',
+    'items.status.sync.revision',
+    'items.status.health',
+    'items.status.summary'
+  ].join(',');
+
   public async listApplications(params?: { search?: string; limit?: number; offset?: number }) {
-    const { body } = await this.client.get<V1alpha1ApplicationList>(
-      `/api/v1/applications`,
-      params?.search ? { search: params.search } : undefined
-    );
+    const { body } = await this.client.get<V1alpha1ApplicationList>(`/api/v1/applications`, {
+      fields: ArgoCDClient.LIST_APPLICATIONS_FIELDS,
+      ...(params?.search ? { search: params.search } : {})
+    });
 
     // Strip heavy fields to reduce token usage
     const strippedItems =
