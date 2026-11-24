@@ -8,6 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { tokenRegistryFromEnv } from './tokenRegistry.js';
+import { authConfigFromEnv, createAuthMiddleware } from './auth.js';
 import {
   applyListenerSecurity,
   resolveListenerSecurity,
@@ -31,6 +32,16 @@ export const connectStdioTransport = () => {
 };
 
 export type TransportOptions = ListenerSecurityOptions;
+
+// Enforce inbound JWT auth on MCP routes when configured (MCP_AUTH_JWKS_URL &
+// co., for deployments behind an identity-aware proxy). Complements the
+// listener security middleware. /healthz stays open for Kubernetes probes.
+const applyInboundAuth = (app: express.Express, paths: string[]) => {
+  const authConfig = authConfigFromEnv();
+  if (!authConfig) return;
+  app.use(paths, createAuthMiddleware(authConfig));
+  logger.info(`Inbound JWT auth enabled on ${paths.join(', ')} (header: ${authConfig.header})`);
+};
 
 // Liveness probe, registered before the security middleware: a kubelet probe
 // addresses the pod IP and carries no bearer token. Reports only that we are up.
@@ -99,6 +110,7 @@ export const connectSSETransport = (options: TransportOptions) => {
   const app = express();
   registerHealthz(app);
   applyListenerSecurity(app, security);
+  applyInboundAuth(app, ['/sse', '/messages']);
   const transports: { [sessionId: string]: SSEServerTransport } = {};
 
   app.get('/sse', async (req, res) => {
@@ -136,8 +148,10 @@ export const connectHttpTransport = (options: TransportOptions & { stateless?: b
   const app = express();
   registerHealthz(app);
   applyListenerSecurity(app, security);
-  // After the security middleware, so malformed JSON returns 401/403 rather than
-  // the body parser's 400, which would tell a caller it passed the credential check.
+  applyInboundAuth(app, ['/mcp']);
+  // After the security and auth middleware, so malformed JSON returns 401/403
+  // rather than the body parser's 400, which would tell a caller it passed the
+  // credential check.
   app.use(express.json());
 
   const httpTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
