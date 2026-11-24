@@ -4,6 +4,34 @@ export interface HttpResponse<T> {
   body: T;
 }
 
+// A non-2xx answer from ArgoCD. Thrown rather than returned, so a refused call
+// reaches the tool caller as an error instead of as an empty result.
+export class HttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string
+  ) {
+    super(message);
+    this.name = 'HttpError';
+  }
+
+  static async from(response: Response): Promise<HttpError> {
+    let detail: string | undefined;
+    try {
+      const body = (await response.json()) as { message?: unknown; error?: unknown };
+      const text = typeof body?.message === 'string' ? body.message : body?.error;
+      if (typeof text === 'string' && text.trim()) detail = text.trim().slice(0, 500);
+    } catch {
+      // Not JSON (a proxy's HTML error page, an empty body): the status says enough.
+    }
+    return new HttpError(
+      response.status,
+      `ArgoCD answered ${response.status}${response.statusText ? ` ${response.statusText}` : ''}` +
+        (detail ? `: ${detail}` : '')
+    );
+  }
+}
+
 type SearchParams = Record<string, string | number | boolean | undefined | null> | null;
 
 export type HttpClientOptions = {
@@ -64,6 +92,7 @@ export class HttpClient {
       });
     }
     const response = await this.send(urlObject, init);
+    if (!response.ok) throw await HttpError.from(response);
     const body = await response.json();
     return {
       status: response.status,
@@ -85,6 +114,7 @@ export class HttpClient {
       });
     }
     const response = await this.send(urlObject, init);
+    if (!response.ok) throw await HttpError.from(response);
     const reader = response.body?.getReader();
     if (!reader) {
       throw new Error('response body is not readable');
@@ -109,11 +139,15 @@ export class HttpClient {
     }
   }
 
+  // Resolved under the base URL's path, so ArgoCD served under a prefix
+  // (https://host/argocd) gets /argocd/api/v1/..., not /api/v1/... on whatever
+  // else shares the host.
   absUrl(url: string): URL {
     if (url.startsWith('http://') || url.startsWith('https://')) {
       return new URL(url);
     }
-    return new URL(url, this.baseUrl);
+    const base = this.baseUrl.endsWith('/') ? this.baseUrl : `${this.baseUrl}/`;
+    return new URL(url.replace(/^\/+/, ''), base);
   }
 
   async get<R>(url: string, params?: SearchParams): Promise<HttpResponse<R>> {

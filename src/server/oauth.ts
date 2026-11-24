@@ -26,7 +26,8 @@ export const OAUTH_ENV = {
   scopes: 'MCP_OAUTH_SCOPES',
   exchangeAudience: 'ARGOCD_TOKEN_EXCHANGE_AUDIENCE',
   exchangeScope: 'ARGOCD_TOKEN_EXCHANGE_SCOPE',
-  exchangeClientId: 'ARGOCD_TOKEN_EXCHANGE_CLIENT_ID'
+  exchangeClientId: 'ARGOCD_TOKEN_EXCHANGE_CLIENT_ID',
+  requireAtJwt: 'MCP_OAUTH_REQUIRE_AT_JWT'
 } as const;
 
 // What the MCP client asks for when it signs the user in. offline_access gets it a
@@ -53,6 +54,9 @@ export type OAuthConfig = {
   audience: string;
   publicUrl: URL;
   scopes: string[];
+  // Require the RFC 9068 access-token header (typ: at+jwt), for providers that
+  // set it. Off by default: authentik (2026.8), among others, does not.
+  requireAtJwt: boolean;
   exchange: {
     audience: string;
     scope: string;
@@ -80,21 +84,26 @@ const secureUrl = (name: string, value: string): URL => {
   try {
     url = new URL(value);
   } catch {
-    throw new Error(`${name} is not a valid URL: ${value}`);
+    throw new Error(`${name} is not a valid URL.`);
   }
   if (url.username || url.password || url.search || url.hash) {
-    throw new Error(`${name} must not carry credentials, a query or a fragment: ${value}`);
+    throw new Error(`${name} must not carry credentials, a query or a fragment.`);
   }
   const loopbackHttp = url.protocol === 'http:' && isLoopbackAddress(url.hostname);
   if (url.protocol !== 'https:' && !loopbackHttp) {
-    throw new Error(
-      `${name} must be an https URL (plain http is accepted on loopback only): ${value}`
-    );
+    throw new Error(`${name} must be an https URL (plain http is accepted on loopback only).`);
   }
   return url;
 };
 
 const words = (value: string): string[] => value.split(/\s+/).filter(Boolean);
+
+const booleanOf = (env: Env, name: string): boolean => {
+  const value = valueOf(env, name)?.toLowerCase();
+  if (value === undefined || value === 'false') return false;
+  if (value === 'true') return true;
+  throw new Error(`${name} must be true or false.`);
+};
 
 // Read the OAuth configuration from the environment. Returns undefined when none
 // of it is set, and throws on a partial or unusable configuration rather than
@@ -137,6 +146,7 @@ export const resolveOAuthConfig = (env: Env = process.env): OAuthConfig | undefi
     audience,
     publicUrl,
     scopes,
+    requireAtJwt: booleanOf(env, OAUTH_ENV.requireAtJwt),
     exchange: {
       audience: valueOf(env, OAUTH_ENV.exchangeAudience)!,
       scope: words(valueOf(env, OAUTH_ENV.exchangeScope) ?? DEFAULT_EXCHANGE_SCOPE).join(' '),
@@ -235,6 +245,7 @@ export const createDiscovery = (
 const describeVerificationFailure = (error: unknown): string => {
   if (error instanceof joseErrors.JWTExpired) return 'The access token has expired';
   if (error instanceof joseErrors.JWTClaimValidationFailed) {
+    if (error.claim === 'typ') return 'The token is not an access token';
     return error.reason === 'missing'
       ? 'The access token lacks a required claim'
       : 'The access token was not issued for this server';
@@ -272,7 +283,7 @@ export type TokenClaims = {
 // the SDK's requireBearerAuth answers with 401 and a WWW-Authenticate challenge;
 // clients refresh on 401 and on nothing else.
 export const createTokenVerifier = (
-  config: Pick<OAuthConfig, 'issuer' | 'audience'>,
+  config: Pick<OAuthConfig, 'issuer' | 'audience'> & Partial<Pick<OAuthConfig, 'requireAtJwt'>>,
   discover: () => Promise<AuthorizationServer>,
   keySet?: (jwksUri: URL) => JWTVerifyGetKey
 ): OAuthTokenVerifier => {
@@ -297,7 +308,9 @@ export const createTokenVerifier = (
           issuer: config.issuer,
           audience: config.audience,
           algorithms: ALLOWED_ALGORITHMS,
-          requiredClaims: ['exp', 'sub']
+          requiredClaims: ['exp', 'sub'],
+          // jose accepts application/at+jwt for this too.
+          ...(config.requireAtJwt ? { typ: 'at+jwt' } : {})
         }));
       } catch (error) {
         if (!isTokenError(error)) {
@@ -308,12 +321,14 @@ export const createTokenVerifier = (
 
       // An ID token from the same provider has the same issuer, audience, subject
       // and expiry, and travels more widely (id_token_hint on logout redirects).
-      // Access tokens carry the granted scope and ID tokens do not, in authentik
-      // 2026.8 as in most providers, so require it.
-      if (typeof payload.scope !== 'string') {
+      // With requireAtJwt the header settles it (RFC 9068). Otherwise: access
+      // tokens carry the granted scope and ID tokens do not, in authentik 2026.8
+      // as in most providers, so require it; and Keycloak marks its ID tokens
+      // with typ "ID" in the payload.
+      if (!config.requireAtJwt && (typeof payload.scope !== 'string' || payload.typ === 'ID')) {
         throw new InvalidTokenError('The token is not an access token');
       }
-      const scope = payload.scope;
+      const scope = typeof payload.scope === 'string' ? payload.scope : '';
       const azp = typeof payload.azp === 'string' ? payload.azp : undefined;
       const claims: TokenClaims = {
         sub: payload.sub!,

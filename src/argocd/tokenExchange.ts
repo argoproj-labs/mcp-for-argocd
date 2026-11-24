@@ -6,7 +6,8 @@ import { logger } from '../logging/logging.js';
 // a single issuer, so a token for the MCP server is refused there, and the MCP
 // authorization spec forbids forwarding it anyway.
 //
-// The exchanged token is cached until shortly before it expires. Identity
+// The exchanged token is cached until shortly before it expires; one issued
+// without expires_in is used for the call that asked for it and not cached. Identity
 // providers log every exchange (authentik records it as a login), so exchanging
 // per tool call would flood that log; and concurrent calls for the same user token
 // share one exchange.
@@ -39,6 +40,9 @@ export type TokenExchangeOptions = {
 };
 
 type CacheEntry = { token: string; expiresAt: number };
+// expiresAt is absent when the provider sent no expires_in (RFC 8693 makes it
+// optional): the token is used once and not cached.
+type Exchanged = { token: string; expiresAt?: number };
 
 // Cache keys are hashes, so the map holds no user token in a form that could be
 // sent anywhere.
@@ -89,7 +93,14 @@ export class TokenExchanger {
     const exchange = this.exchange(subjectToken)
       .then(
         (entry) => {
-          this.store(key, entry);
+          if (entry.expiresAt === undefined) {
+            logger.info(
+              { user, audience: this.options.audience },
+              `Exchanged a token for ${user} (audience ${this.options.audience}, no expiry given: not cached)`
+            );
+            return entry.token;
+          }
+          this.store(key, { token: entry.token, expiresAt: entry.expiresAt });
           const validFor = Math.round((entry.expiresAt - this.now()) / 1000);
           logger.info(
             { user, audience: this.options.audience, validFor },
@@ -140,7 +151,7 @@ export class TokenExchanger {
     this.cache.set(key, entry);
   }
 
-  private async exchange(subjectToken: string): Promise<CacheEntry> {
+  private async exchange(subjectToken: string): Promise<Exchanged> {
     const endpoint = await this.options.tokenEndpoint();
     // No `resource` parameter (RFC 8707): authentik refuses an exchange that
     // carries one with invalid_target. The target is named by `audience`.
@@ -157,6 +168,9 @@ export class TokenExchanger {
     try {
       response = await this.fetchImpl(endpoint, {
         method: 'POST',
+        // A 307/308 would replay the body, subject_token included, to wherever
+        // it points. A token endpoint has no reason to redirect.
+        redirect: 'error',
         headers: {
           'content-type': 'application/x-www-form-urlencoded',
           accept: 'application/json'
@@ -186,11 +200,32 @@ export class TokenExchanger {
 
     const token = payload?.access_token;
     const expiresIn = payload?.expires_in;
+    const tokenType = payload?.token_type;
+    const issuedTokenType = payload?.issued_token_type;
     if (typeof token !== 'string' || token === '') {
       throw new TokenExchangeError('The token exchange response carried no access_token.');
     }
+    // RFC 8693 2.2.1: token_type "N_A" means the issued token is not an access
+    // token, so it must not be sent to ArgoCD as a bearer credential.
+    if (typeof tokenType !== 'string' || tokenType.toLowerCase() !== 'bearer') {
+      throw new TokenExchangeError(
+        `The token exchange issued a token of type ${
+          typeof tokenType === 'string' ? JSON.stringify(tokenType.slice(0, 40)) : 'unknown'
+        }, not a Bearer token.`
+      );
+    }
+    // Required by RFC 8693 but omitted by some providers, so checked only when
+    // present.
+    if (issuedTokenType !== undefined && issuedTokenType !== TOKEN_TYPE_ACCESS_TOKEN) {
+      throw new TokenExchangeError(
+        `The token exchange issued a ${
+          typeof issuedTokenType === 'string' ? issuedTokenType.slice(0, 80) : 'non-string'
+        } token, not an access token.`
+      );
+    }
+    if (expiresIn === undefined) return { token };
     if (typeof expiresIn !== 'number' || !Number.isFinite(expiresIn) || expiresIn <= 0) {
-      throw new TokenExchangeError('The token exchange response carried no usable expires_in.');
+      throw new TokenExchangeError('The token exchange response carried an unusable expires_in.');
     }
     return { token, expiresAt: this.now() + expiresIn * 1000 };
   }

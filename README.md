@@ -319,10 +319,11 @@ argocd-mcp ──Bearer (exchanged token)──► ArgoCD
 | `MCP_OAUTH_AUDIENCE` | yes | `argocd-mcp` | The `aud` those tokens must carry. |
 | `MCP_PUBLIC_URL` | yes | `https://argocd-mcp.example.com/mcp` | The URL clients connect to. It is the resource the metadata names, so it must match exactly. A path prefix behind a proxy is not supported. |
 | `ARGOCD_TOKEN_EXCHANGE_AUDIENCE` | yes | `argocd` | Which client the exchanged token is for: ArgoCD's `clientID`. |
-| `ARGOCD_BASE_URL` | yes | `https://argocd.example.com` | The one ArgoCD instance user tokens are sent to. |
+| `ARGOCD_BASE_URL` | yes | `https://argocd.example.com` | The one ArgoCD instance user tokens are sent to. A path prefix (`https://example.com/argocd`) is kept on every request. |
 | `MCP_OAUTH_SCOPES` | no | `openid profile email offline_access` | The scopes clients are told to ask for. `offline_access` gives them a refresh token. |
 | `ARGOCD_TOKEN_EXCHANGE_SCOPE` | no | `openid profile email` | The scopes asked for in the exchange. It must include whatever puts the `groups` claim ArgoCD's RBAC reads into the token. |
-| `ARGOCD_TOKEN_EXCHANGE_CLIENT_ID` | no | defaults to `MCP_OAUTH_AUDIENCE` | The client ID the exchange is requested under. |
+| `ARGOCD_TOKEN_EXCHANGE_CLIENT_ID` | no | defaults to `MCP_OAUTH_AUDIENCE` | The client ID the exchange is requested under. It must be a public client: no client secret is sent, so a confidential client (Keycloak's standard token exchange, for one) refuses the exchange. |
+| `MCP_OAUTH_REQUIRE_AT_JWT` | no | `false` | `true` requires the RFC 9068 access-token header (`typ: at+jwt`) and drops the `scope` check below. Turn it on only if your provider sets that header; authentik (2026.8) does not. |
 
 ```bash
 export MCP_OAUTH_ISSUER=https://id.example.com/application/o/argocd-mcp/
@@ -342,7 +343,7 @@ claude mcp add --transport http --client-id argocd-mcp argocd https://argocd-mcp
 What the server does:
 
 - Serves [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728) metadata at `/.well-known/oauth-protected-resource/mcp`, naming the issuer. A request without a valid token gets `401` with a `WWW-Authenticate` header pointing there, which is how the client knows where to sign in.
-- Validates each token against the issuer's key set: signature (asymmetric algorithms only), issuer, audience, expiry, `sub`, and a `scope` claim, so ID tokens are refused. An expired token gets `401`, which is what makes clients refresh. A key set it cannot load gets `500`, not `401`, so an identity-provider outage does not send every client back to sign in.
+- Validates each token against the issuer's key set: signature (asymmetric algorithms only), issuer, audience, expiry, `sub`, and a `scope` claim (or, with `MCP_OAUTH_REQUIRE_AT_JWT`, the `at+jwt` header), so ID tokens are refused. An expired token gets `401`, which is what makes clients refresh. A key set it cannot load gets `500`, not `401`, so an identity-provider outage does not send every client back to sign in.
 - Exchanges the token on the first tool call and keeps the result until 30 seconds before it expires. If ArgoCD answers `401` anyway, it exchanges once more and retries.
 - Ties each session to the user who opened it. Another user's session ID is treated as unknown. Each user holds at most 20 sessions.
 

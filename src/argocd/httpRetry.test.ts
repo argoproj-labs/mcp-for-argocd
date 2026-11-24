@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, beforeEach, test } from 'node:test';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { HttpClient } from './http.js';
+import { HttpClient, HttpError } from './http.js';
 
 // The one-shot retry on 401 that lets a short-lived exchanged token be replaced.
 
@@ -14,6 +14,7 @@ const BAD = 'bad-token';
 let server: http.Server;
 let baseUrl: string;
 let seen: Seen[] = [];
+const seenPaths: string[] = [];
 
 before(async () => {
   server = http.createServer((req, res) => {
@@ -22,8 +23,12 @@ before(async () => {
     req.on('end', () => {
       const auth = req.headers.authorization;
       seen.push({ method: req.method, auth, body: Buffer.concat(chunks).toString('utf8') });
+      seenPaths.push(req.url ?? '');
       res.setHeader('content-type', 'application/json');
-      if (auth === `Bearer ${GOOD}`) {
+      if (req.url === '/missing') {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: 'not found', message: 'application not found' }));
+      } else if (auth === `Bearer ${GOOD}`) {
         res.statusCode = 200;
         res.end(JSON.stringify({ ok: true }));
       } else {
@@ -64,24 +69,24 @@ test('a 401 is retried once with the token onUnauthorized returns', async () => 
   assert.equal(client.apiToken, GOOD);
 });
 
-test('without onUnauthorized the 401 is returned and nothing is retried', async () => {
+const rejects401 = (error: unknown) =>
+  error instanceof HttpError && error.status === 401 && /ArgoCD answered 401/.test(error.message);
+
+test('without onUnauthorized the 401 is thrown and nothing is retried', async () => {
   const client = new HttpClient(baseUrl, BAD);
-  const res = await client.get('/api/v1/x');
-  assert.equal(res.status, 401);
+  await assert.rejects(client.get('/api/v1/x'), rejects401);
   assert.equal(seen.length, 1);
 });
 
 test('onUnauthorized returning undefined means no retry', async () => {
   const client = new HttpClient(baseUrl, BAD, { onUnauthorized: async () => undefined });
-  const res = await client.get('/api/v1/x');
-  assert.equal(res.status, 401);
+  await assert.rejects(client.get('/api/v1/x'), rejects401);
   assert.equal(seen.length, 1);
 });
 
 test('onUnauthorized returning the same token means no retry', async () => {
   const client = new HttpClient(baseUrl, BAD, { onUnauthorized: async () => BAD });
-  const res = await client.get('/api/v1/x');
-  assert.equal(res.status, 401);
+  await assert.rejects(client.get('/api/v1/x'), rejects401);
   assert.equal(seen.length, 1);
 });
 
@@ -119,8 +124,7 @@ test('only one retry is made when the second attempt is also a 401', async () =>
       return 'still-bad';
     }
   });
-  const res = await client.get('/api/v1/x');
-  assert.equal(res.status, 401);
+  await assert.rejects(client.get('/api/v1/x'), rejects401);
   assert.equal(calls, 1);
   assert.equal(seen.length, 2);
 });
@@ -139,4 +143,39 @@ test('the retried token is kept for later requests', async () => {
   assert.equal(res.status, 200);
   assert.equal(calls, 1);
   assert.equal(seen.length, 1);
+});
+
+test('the base URL path is kept: ArgoCD served under a prefix', () => {
+  for (const base of ['https://host/argocd', 'https://host/argocd/']) {
+    const client = new HttpClient(base, GOOD);
+    assert.equal(
+      client.absUrl('/api/v1/applications').href,
+      'https://host/argocd/api/v1/applications'
+    );
+    assert.equal(
+      client.absUrl('api/v1/applications').href,
+      'https://host/argocd/api/v1/applications'
+    );
+  }
+  assert.equal(
+    new HttpClient('https://host', GOOD).absUrl('/api/v1/applications').href,
+    'https://host/api/v1/applications'
+  );
+});
+
+test('a prefixed base URL is used on the wire', async () => {
+  const client = new HttpClient(`${baseUrl}/argocd`, GOOD);
+  await client.get('/api/v1/x');
+  assert.equal(seen.length, 1);
+  assert.equal(seenPaths.at(-1), '/argocd/api/v1/x');
+});
+
+test('a non-2xx answer other than 401 is thrown with its message', async () => {
+  const client = new HttpClient(baseUrl, GOOD);
+  await assert.rejects(client.get('/missing'), (error: unknown) => {
+    assert.ok(error instanceof HttpError);
+    assert.equal(error.status, 404);
+    assert.match(error.message, /ArgoCD answered 404.*application not found/);
+    return true;
+  });
 });

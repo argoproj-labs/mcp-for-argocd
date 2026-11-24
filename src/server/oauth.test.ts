@@ -294,6 +294,40 @@ for (const field of ['jwks_uri', 'token_endpoint']) {
   });
 }
 
+test('URL errors never echo the value, which may hold a pasted secret', () => {
+  const SECRET = 's3cr3t-token';
+  for (const value of [
+    `https://user:${SECRET}@id.example.com/`,
+    `https://id.example.com/?token=${SECRET}`,
+    `http://id.example.com/${SECRET}`,
+    `not a url ${SECRET}`
+  ]) {
+    assert.throws(
+      () => resolveOAuthConfig({ ...base, MCP_OAUTH_ISSUER: value }),
+      (error: unknown) =>
+        error instanceof Error &&
+        error.message.startsWith('MCP_OAUTH_ISSUER') &&
+        !error.message.includes(SECRET)
+    );
+  }
+});
+
+test('MCP_OAUTH_REQUIRE_AT_JWT is a strict boolean, off by default', () => {
+  assert.equal(resolveOAuthConfig(base)!.requireAtJwt, false);
+  assert.equal(
+    resolveOAuthConfig({ ...base, MCP_OAUTH_REQUIRE_AT_JWT: 'TRUE' })!.requireAtJwt,
+    true
+  );
+  assert.equal(
+    resolveOAuthConfig({ ...base, MCP_OAUTH_REQUIRE_AT_JWT: 'false' })!.requireAtJwt,
+    false
+  );
+  assert.throws(
+    () => resolveOAuthConfig({ ...base, MCP_OAUTH_REQUIRE_AT_JWT: 'yes' }),
+    /MCP_OAUTH_REQUIRE_AT_JWT must be true or false/
+  );
+});
+
 // createTokenVerifier
 
 type Keys = { privateKey: CryptoKey; publicJwk: JWK };
@@ -318,8 +352,11 @@ const server: AuthorizationServer = {
   tokenEndpoint: new URL(goodDocument.token_endpoint)
 };
 
-const verifier = (discover: () => Promise<AuthorizationServer> = async () => server) =>
-  createTokenVerifier({ issuer: ISSUER, audience: AUDIENCE }, discover, () =>
+const verifier = (
+  discover: () => Promise<AuthorizationServer> = async () => server,
+  requireAtJwt = false
+) =>
+  createTokenVerifier({ issuer: ISSUER, audience: AUDIENCE, requireAtJwt }, discover, () =>
     createLocalJWKSet({ keys: [signer.publicJwk] })
   );
 
@@ -327,7 +364,7 @@ const nowSec = () => Math.floor(Date.now() / 1000);
 
 const sign = async (
   claims: JWTPayload = {},
-  opts: { key?: CryptoKey; alg?: string; omit?: string[]; exp?: number | null } = {}
+  opts: { key?: CryptoKey; alg?: string; omit?: string[]; exp?: number | null; typ?: string } = {}
 ) => {
   const payload: JWTPayload = {
     iss: ISSUER,
@@ -340,7 +377,11 @@ const sign = async (
   };
   for (const name of opts.omit ?? []) delete payload[name];
   return new SignJWT(payload)
-    .setProtectedHeader({ alg: opts.alg ?? 'RS256', kid: 'k1' })
+    .setProtectedHeader({
+      alg: opts.alg ?? 'RS256',
+      kid: 'k1',
+      ...(opts.typ ? { typ: opts.typ } : {})
+    })
     .sign(opts.key ?? signer.privateKey);
 };
 
@@ -550,4 +591,33 @@ test('userOf prefers the username, then the email, then the subject', () => {
   assert.equal(userOf(auth({ sub: 's', email: 'e@x' })), 'e@x');
   assert.equal(userOf(auth({ sub: 's' })), 's');
   assert.equal(userOf(undefined), undefined);
+});
+
+test('a Keycloak ID token (payload typ "ID") is refused even with a scope', async () => {
+  await assert.rejects(
+    async () => verifier().verifyAccessToken(await sign({ typ: 'ID' })),
+    (error: unknown) =>
+      error instanceof InvalidTokenError && /not an access token/.test(error.message)
+  );
+});
+
+test('requireAtJwt: an at+jwt token is accepted, scope or not', async () => {
+  for (const typ of ['at+jwt', 'application/at+jwt']) {
+    const info = await verifier(undefined, true).verifyAccessToken(await sign({}, { typ }));
+    assert.equal(info.extra?.sub, 'user-1');
+  }
+  const noScope = await verifier(undefined, true).verifyAccessToken(
+    await sign({}, { typ: 'at+jwt', omit: ['scope'] })
+  );
+  assert.deepEqual(noScope.scopes, []);
+});
+
+test('requireAtJwt: a token without typ at+jwt is refused, even with a scope', async () => {
+  for (const typ of [undefined, 'JWT']) {
+    await assert.rejects(
+      async () => verifier(undefined, true).verifyAccessToken(await sign({}, { typ })),
+      (error: unknown) =>
+        error instanceof InvalidTokenError && /not an access token/.test(error.message)
+    );
+  }
 });

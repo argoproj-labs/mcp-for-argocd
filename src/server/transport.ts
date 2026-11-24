@@ -295,10 +295,13 @@ export const connectHttpTransport = (
       });
       await server.connect(transport);
     } else {
+      // MCP session management: 404 for a session ID that is unknown or expired
+      // (closed, evicted, or another user's), which tells the client to
+      // initialize again; 400 when the ID is missing altogether.
       const errorMsg = sessionIdFromHeader
-        ? `Invalid or expired session ID: ${sessionIdFromHeader}`
+        ? 'Session not found: it may have expired. Initialize a new session.'
         : 'Bad Request: Not an initialization request and no valid session ID provided.';
-      res.status(400).json({
+      res.status(sessionIdFromHeader ? 404 : 400).json({
         jsonrpc: '2.0',
         error: { code: -32000, message: errorMsg },
         id: req.body?.id !== undefined ? req.body.id : null
@@ -314,9 +317,14 @@ export const connectHttpTransport = (
       res.status(405).send('Method Not Allowed in stateless mode');
       return;
     }
-    const session = sessionFor(req, req.headers['mcp-session-id'] as string | undefined);
+    const sessionId = req.headers['mcp-session-id'] as string | undefined;
+    if (!sessionId) {
+      res.status(400).send('Missing session ID');
+      return;
+    }
+    const session = sessionFor(req, sessionId);
     if (!session) {
-      res.status(400).send('Invalid or missing session ID');
+      res.status(404).send('Session not found');
       return;
     }
     await session.transport.handleRequest(req, res);

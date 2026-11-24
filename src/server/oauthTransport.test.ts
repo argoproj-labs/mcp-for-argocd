@@ -459,8 +459,8 @@ test('treats another user presenting a session ID as an unknown session', async 
   const sessionId = await openSession(env, alice);
 
   const stolen = await callTool(env, bob, sessionId);
-  assert.equal(stolen.reply.status, 400, stolen.reply.body);
-  assert.match(stolen.reply.body, /Invalid or expired session ID/);
+  assert.equal(stolen.reply.status, 404, stolen.reply.body);
+  assert.match(stolen.reply.body, /Session not found/);
   assert.equal(env.argocdRequests.length, 0);
   assert.equal(exchangesOf(env, env.tokenRequests).length, 0);
 
@@ -475,6 +475,37 @@ test('treats another user presenting a session ID as an unknown session', async 
       method,
       headers: mcpHeaders(env.mcpPort, bob, sessionId)
     });
+    assert.equal(reply.status, 404, method);
+  }
+});
+
+test('an evicted session answers 404, so the client initializes again', async (t) => {
+  const env = await setup(t);
+  const token = await env.sign();
+  const oldest = await openSession(env, token);
+  for (let i = 0; i < 20; i++) await openSession(env, token);
+
+  const evicted = await callTool(env, token, oldest);
+  assert.equal(evicted.reply.status, 404, evicted.reply.body);
+  for (const method of ['GET', 'DELETE']) {
+    const reply = await send(env.mcpPort, {
+      method,
+      headers: mcpHeaders(env.mcpPort, token, oldest)
+    });
+    assert.equal(reply.status, 404, method);
+  }
+});
+
+test('a request without a session ID is still a 400', async (t) => {
+  const env = await setup(t);
+  const token = await env.sign();
+  const post = await send(env.mcpPort, {
+    headers: mcpHeaders(env.mcpPort, token),
+    body: { jsonrpc: '2.0', id: 1, method: 'tools/list' }
+  });
+  assert.equal(post.status, 400, post.body);
+  for (const method of ['GET', 'DELETE']) {
+    const reply = await send(env.mcpPort, { method, headers: mcpHeaders(env.mcpPort, token) });
     assert.equal(reply.status, 400, method);
   }
 });
@@ -503,9 +534,9 @@ test('does not retry forever when ArgoCD keeps rejecting', async (t) => {
   const token = await env.sign();
   const sessionId = await openSession(env, token);
 
-  // The client does not turn a non-2xx answer into an error (pre-existing), so
-  // only the bound on attempts is asserted.
-  await callTool(env, token, sessionId);
+  const result = await callTool(env, token, sessionId);
+  assert.equal(result.rpc?.result?.isError, true, JSON.stringify(result.rpc));
+  assert.match(result.rpc?.result?.content?.[0]?.text, /ArgoCD answered 401/);
   assert.equal(env.argocdRequests.length, 2);
   assert.equal(env.state.exchangeCount, 2);
 });
