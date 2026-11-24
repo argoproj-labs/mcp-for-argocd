@@ -135,6 +135,12 @@ export const connectHttpTransport = (
 ) => {
   const security = resolveListenerSecurity(options);
   const { port, stateless = false, jsonResponse = false } = options;
+  // In JSON mode the SDK keeps every finished response on a long-lived transport, and
+  // closing a session mid-call leaves the pending POST unanswered. Stateless mode
+  // builds a fresh transport per request, so neither can happen there.
+  if (jsonResponse && !stateless) {
+    throw new Error('--json-response requires --stateless.');
+  }
   const app = express();
   registerHealthz(app);
   applyListenerSecurity(app, security);
@@ -161,8 +167,7 @@ export const connectHttpTransport = (
               sessionIdGenerator: () => randomUUID(),
               onsessioninitialized: (newSessionId) => {
                 httpTransports[newSessionId] = transport;
-              },
-              enableJsonResponse: jsonResponse
+              }
             }
       );
 

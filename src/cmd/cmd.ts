@@ -118,10 +118,9 @@ export const cmd = () => {
           type: 'boolean',
           default: false,
           description:
-            'Return a single JSON response instead of upgrading to an SSE stream. ' +
-            'Independent of --stateless: a stateless deployment gains nothing from an SSE ' +
-            "stream's resumability, and some MCP clients treat a stateless server's " +
-            'end-of-stream as a connection failure when no SSE session/event ID is present.'
+            'Reply to each request with a single JSON body instead of an SSE stream, ' +
+            'which avoids client-side limits on the size of one SSE event. ' +
+            'Requires --stateless.'
         }),
     (argv) =>
       start(() =>

@@ -343,15 +343,15 @@ This mode is recommended for Kubernetes deployments with Horizontal Pod Autoscal
 
 ### JSON Response Mode
 
-By default, the HTTP transport upgrades every tool-call response to a Server-Sent Events (SSE) stream. Some MCP clients treat the end of that stream as a connection failure unless the server also sent a resumable SSE event ID on it — which a `--stateless` server never does, since it keeps no event store to resume from. This shows up client-side as an error such as `SSE stream ended without a response`.
-
-To make the server return a single JSON body instead of an SSE stream, start it with the `--json-response` flag:
+By default, the HTTP transport answers each tool call with a Server-Sent Events (SSE) stream: the response arrives as an event on a stream that the server closes once it is sent. To reply with a single JSON body (`Content-Type: application/json`) instead, start the server with the `--json-response` flag:
 
 ```bash
 node dist/index.js http --stateless --json-response
 ```
 
-`--json-response` is independent of `--stateless` and can be combined with either mode. It's most useful together with `--stateless`, since a stateless deployment gains nothing from SSE's resumability in the first place.
+This matters for tools with large responses such as `list_applications`, which can return several megabytes on a big ArgoCD instance. The Python `mcp` SDK v2 client rejects any single SSE event larger than 1 MiB by default (`max_sse_event_size`) and fails the call with `SSE stream failed: Server-sent event exceeded the 1048576 byte limit`. JSON responses are not subject to that limit.
+
+`--json-response` requires `--stateless`, and the server refuses to start without it. In session mode the SDK keeps every finished response in memory until the session ends, and closing a session while a tool call is running leaves that call's request unanswered.
 
 ## For Development
 

@@ -271,6 +271,13 @@ test('without --json-response, initialize is upgraded to an SSE stream by defaul
   }
 });
 
+test('--json-response without --stateless is refused at startup', () => {
+  assert.throws(
+    () => connectHttpTransport({ port: 0, authToken: INBOUND_TOKEN, jsonResponse: true }),
+    /--json-response requires --stateless/
+  );
+});
+
 test('an absent or empty Host header is rejected, not treated as an allowed name', async () => {
   const { port, close } = await startTransport(connectHttpTransport);
   try {
