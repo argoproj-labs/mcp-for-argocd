@@ -87,7 +87,15 @@ export class HttpClient {
     if (url.startsWith('http://') || url.startsWith('https://')) {
       return new URL(url);
     }
-    return new URL(url, this.baseUrl);
+    // Preserve any subpath in baseUrl (e.g. https://host/argocd). JavaScript's
+    // URL constructor strips the base path when the input is absolute:
+    //   new URL('/api/v1/x', 'https://host/argocd').href === 'https://host/api/v1/x'
+    // which routes requests past the ingress mount-point for any ArgoCD
+    // installed behind a subpath. Make the input relative and ensure the
+    // base ends with a slash so the subpath is treated as a real prefix.
+    const base = this.baseUrl.endsWith('/') ? this.baseUrl : this.baseUrl + '/';
+    const rel = url.startsWith('/') ? url.slice(1) : url;
+    return new URL(rel, base);
   }
 
   async get<R>(url: string, params?: SearchParams): Promise<HttpResponse<R>> {
