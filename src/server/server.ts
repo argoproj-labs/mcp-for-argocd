@@ -68,13 +68,13 @@ export class Server extends McpServer {
     // Always register read/query tools
     this.addJsonOutputTool(
       'list_applications',
-      'list_applications returns list of applications',
+      'list_applications returns a compact summary of applications: name, namespace, project, labels, source, destination, sync status, health status and operation phase. Use get_application for the full Application object.',
       {
         search: z
           .string()
           .optional()
           .describe(
-            'Search applications by name. This is a partial match on the application name and does not support glob patterns (e.g. "*"). Optional.'
+            'Case-insensitive substring match on the application name. Glob patterns (e.g. "*") are not supported. Optional.'
           ),
         limit: z
           .number()
@@ -94,11 +94,7 @@ export class Server extends McpServer {
           )
       },
       async ({ search, limit, offset }, client) =>
-        await client.listApplications({
-          search: search ?? undefined,
-          limit,
-          offset
-        })
+        await client.listApplications({ search, limit, offset })
     );
     this.addJsonOutputTool(
       'list_clusters',
