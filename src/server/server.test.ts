@@ -175,3 +175,36 @@ test('with no default token, an overridden URL still resolves only from the regi
   assert.equal(result.isError, true);
   assert.match(textOf(result), /Missing required ArgoCD API token/);
 });
+
+test('list_projects is registered and enforces the same token-resolution boundary', async () => {
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry()
+  });
+
+  // callTool asserts the tool is registered; the unregistered override must
+  // fail before any HTTP request, keeping this test hermetic.
+  const result = await callTool(server, 'list_projects', { argocdBaseUrl: EVIL_BASE_URL });
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /Missing required ArgoCD API token/);
+});
+
+test('list_applications accepts the project and destCluster filter arguments', async () => {
+  const server = createServer({
+    argocdBaseUrl: DEFAULT_BASE_URL,
+    argocdApiToken: DEFAULT_TOKEN,
+    tokenRegistry: new TokenRegistry()
+  });
+
+  // Schema validation runs before token resolution: unknown/invalid arguments
+  // would be rejected by the SDK, while valid ones reach resolveClient and fail
+  // there (hermetically) on the unregistered base URL.
+  const result = await callTool(server, 'list_applications', {
+    argocdBaseUrl: EVIL_BASE_URL,
+    project: 'default',
+    destCluster: 'in-cluster'
+  });
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /Missing required ArgoCD API token/);
+});
