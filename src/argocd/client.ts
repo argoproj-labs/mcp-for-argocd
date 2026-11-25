@@ -11,6 +11,7 @@ import {
   V1alpha1ClusterList,
   V1alpha1AppProject
 } from '../types/argocd-types.js';
+import type { PatchOp } from '../shared/parameters.js';
 import { HttpClient } from './http.js';
 
 export class ArgoCDClient {
@@ -108,6 +109,31 @@ export class ArgoCDClient {
       `/api/v1/applications/${applicationName}`,
       null,
       application
+    );
+    return body;
+  }
+
+  // Argo CD's patch endpoint takes every parameter in the body — there are no
+  // query params — and `patch` is a string holding the serialized RFC 6902
+  // document. `project` is deliberately omitted: it is an optional server-side
+  // filter, and name plus namespace already identify the application.
+  public async patchApplication(
+    applicationName: string,
+    ops: PatchOp[],
+    options?: { appNamespace?: string }
+  ) {
+    const requestBody: Record<string, string> = {
+      patch: JSON.stringify(ops),
+      patchType: 'json'
+    };
+    if (options?.appNamespace) {
+      requestBody.appNamespace = options.appNamespace;
+    }
+
+    const { body } = await this.client.patch<Record<string, string>, V1alpha1Application>(
+      `/api/v1/applications/${applicationName}`,
+      null,
+      requestBody
     );
     return body;
   }
