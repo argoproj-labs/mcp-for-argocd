@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mcp-for-argocd.fullname" . }}
+  labels:
+    {{- include "mcp-for-argocd.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mcp-for-argocd.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcp-for-argocd.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+      - name: mcp-for-argocd
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - containerPort: {{ .Values.port }}
+          name: http
+        env:
+        - name: ARGOCD_BASE_URL
+          value: {{ .Values.env.ARGOCD_BASE_URL | quote }}
+        - name: ARGOCD_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secret.name }}
+              key: ARGOCD_API_TOKEN
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
