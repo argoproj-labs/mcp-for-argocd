@@ -25,44 +25,46 @@ export class ArgoCDClient {
   }
 
   public async listApplications(params?: { search?: string; limit?: number; offset?: number }) {
-    const { body } = await this.client.get<V1alpha1ApplicationList>(
-      `/api/v1/applications`,
-      params?.search ? { search: params.search } : undefined
-    );
+    const { body } = await this.client.get<V1alpha1ApplicationList>(`/api/v1/applications`);
+    const applications = body.items ?? [];
 
-    // Strip heavy fields to reduce token usage
-    const strippedItems =
-      body.items?.map((app) => ({
-        metadata: {
-          name: app.metadata?.name,
-          namespace: app.metadata?.namespace,
-          labels: app.metadata?.labels,
-          creationTimestamp: app.metadata?.creationTimestamp
-        },
-        spec: {
-          project: app.spec?.project,
-          source: app.spec?.source,
-          destination: app.spec?.destination
-        },
-        status: {
-          sync: app.status?.sync,
-          health: app.status?.health,
-          summary: app.status?.summary
-        }
-      })) ?? [];
+    // Argo CD's REST API does not support a generic search parameter on
+    // GET /api/v1/applications, so apply the tool's documented name search locally.
+    const search = params?.search?.trim().toLowerCase();
+    const filteredItems = search
+      ? applications.filter((app) => app.metadata?.name?.toLowerCase().includes(search))
+      : applications;
 
-    // Apply pagination
     const start = params?.offset ?? 0;
-    const end = params?.limit ? start + params.limit : strippedItems.length;
-    const items = strippedItems.slice(start, end);
+    const end = params?.limit ? start + params.limit : filteredItems.length;
+
+    // Strip heavy fields from the requested page to reduce token usage.
+    const items = filteredItems.slice(start, end).map((app) => ({
+      metadata: {
+        name: app.metadata?.name,
+        namespace: app.metadata?.namespace,
+        labels: app.metadata?.labels,
+        creationTimestamp: app.metadata?.creationTimestamp
+      },
+      spec: {
+        project: app.spec?.project,
+        source: app.spec?.source,
+        destination: app.spec?.destination
+      },
+      status: {
+        sync: app.status?.sync,
+        health: app.status?.health,
+        summary: app.status?.summary
+      }
+    }));
 
     return {
       items,
       metadata: {
         resourceVersion: body.metadata?.resourceVersion,
-        totalItems: strippedItems.length,
+        totalItems: filteredItems.length,
         returnedItems: items.length,
-        hasMore: end < strippedItems.length
+        hasMore: end < filteredItems.length
       }
     };
   }
