@@ -39,6 +39,8 @@ const setup = (
   return { calls, clock, exchanger };
 };
 
+const ISSUED = { issued_token_type: 'urn:ietf:params:oauth:token-type:access_token' };
+
 const ok = (token: string, expiresIn = 300) =>
   json(200, {
     access_token: token,
@@ -62,6 +64,7 @@ test('sends the exact RFC 8693 form and no resource parameter', async () => {
     client_id: 'mcp-client',
     subject_token: 'subject-1',
     subject_token_type: 'urn:ietf:params:oauth:token-type:access_token',
+    requested_token_type: 'urn:ietf:params:oauth:token-type:access_token',
     audience: 'argocd',
     scope: 'openid profile email'
   });
@@ -191,7 +194,7 @@ test('a 200 with a non-JSON body is rejected', async () => {
 for (const bad of [0, -5, '300', null, Number.NaN]) {
   test(`expires_in ${JSON.stringify(bad)} is rejected`, async () => {
     const { exchanger } = setup(() =>
-      json(200, { access_token: 'x', token_type: 'Bearer', expires_in: bad })
+      json(200, { ...ISSUED, access_token: 'x', token_type: 'Bearer', expires_in: bad })
     );
     await assert.rejects(exchanger.getToken('s'), /expires_in/);
   });
@@ -234,7 +237,7 @@ test('expired entries are dropped before live ones when the cache is full', asyn
 
 test('without expires_in the token is used for this call and not cached', async () => {
   const { calls, exchanger } = setup((_c, n) =>
-    json(200, { access_token: `once-${n}`, token_type: 'Bearer' })
+    json(200, { ...ISSUED, access_token: `once-${n}`, token_type: 'Bearer' })
   );
   assert.equal(await exchanger.getToken('s'), 'once-1');
   assert.equal(exchanger.size, 0);
@@ -245,7 +248,7 @@ test('without expires_in the token is used for this call and not cached', async 
 for (const tokenType of [undefined, 'N_A', 'DPoP', 42]) {
   test(`token_type ${JSON.stringify(tokenType)} is rejected`, async () => {
     const { exchanger } = setup(() =>
-      json(200, { access_token: 'x', token_type: tokenType, expires_in: 300 })
+      json(200, { ...ISSUED, access_token: 'x', token_type: tokenType, expires_in: 300 })
     );
     await assert.rejects(exchanger.getToken('s'), /not a Bearer token/);
     assert.equal(exchanger.size, 0);
@@ -254,7 +257,7 @@ for (const tokenType of [undefined, 'N_A', 'DPoP', 42]) {
 
 test('token_type is compared case-insensitively', async () => {
   const { exchanger } = setup(() =>
-    json(200, { access_token: 'x', token_type: 'bearer', expires_in: 300 })
+    json(200, { ...ISSUED, access_token: 'x', token_type: 'bearer', expires_in: 300 })
   );
   assert.equal(await exchanger.getToken('s'), 'x');
 });
@@ -271,9 +274,21 @@ test('an issued_token_type other than access_token is rejected', async () => {
   await assert.rejects(exchanger.getToken('s'), /not an access token/);
 });
 
-test('a missing issued_token_type is accepted', async () => {
+test('a missing issued_token_type is rejected', async () => {
   const { exchanger } = setup(() =>
     json(200, { access_token: 'x', token_type: 'Bearer', expires_in: 300 })
   );
-  assert.equal(await exchanger.getToken('s'), 'x');
+  await assert.rejects(exchanger.getToken('s'), /without issued_token_type, not an access token/);
+});
+
+test('the generic jwt token type is rejected', async () => {
+  const { exchanger } = setup(() =>
+    json(200, {
+      access_token: 'x',
+      token_type: 'Bearer',
+      issued_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+      expires_in: 300
+    })
+  );
+  await assert.rejects(exchanger.getToken('s'), /not an access token/);
 });

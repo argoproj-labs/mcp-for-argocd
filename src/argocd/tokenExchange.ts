@@ -160,6 +160,9 @@ export class TokenExchanger {
       client_id: this.options.clientId,
       subject_token: subjectToken,
       subject_token_type: TOKEN_TYPE_ACCESS_TOKEN,
+      // Asked for explicitly: left out, a provider may pick another type (the
+      // generic jwt one, say), which would then be refused below.
+      requested_token_type: TOKEN_TYPE_ACCESS_TOKEN,
       audience: this.options.audience,
       scope: this.options.scope
     });
@@ -214,13 +217,15 @@ export class TokenExchanger {
         }, not a Bearer token.`
       );
     }
-    // Required by RFC 8693 but omitted by some providers, so checked only when
-    // present.
-    if (issuedTokenType !== undefined && issuedTokenType !== TOKEN_TYPE_ACCESS_TOKEN) {
+    // Required by RFC 8693, and authentik has sent it since its first release
+    // with token exchange (2026.8).
+    if (issuedTokenType !== TOKEN_TYPE_ACCESS_TOKEN) {
       throw new TokenExchangeError(
-        `The token exchange issued a ${
-          typeof issuedTokenType === 'string' ? issuedTokenType.slice(0, 80) : 'non-string'
-        } token, not an access token.`
+        `The token exchange issued ${
+          typeof issuedTokenType === 'string'
+            ? `a ${issuedTokenType.slice(0, 80)} token`
+            : 'a token without issued_token_type'
+        }, not an access token.`
       );
     }
     if (expiresIn === undefined) return { token };

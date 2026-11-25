@@ -24,7 +24,8 @@ import {
   subjectOf,
   userOf,
   type AuthorizationServer,
-  type OAuthConfig
+  type OAuthConfig,
+  type TokenTypeCheck
 } from './oauth.js';
 
 const ISSUER = 'https://id.example.com/application/o/argocd-mcp/';
@@ -296,36 +297,52 @@ for (const field of ['jwks_uri', 'token_endpoint']) {
 
 test('URL errors never echo the value, which may hold a pasted secret', () => {
   const SECRET = 's3cr3t-token';
-  for (const value of [
+  const bad = [
     `https://user:${SECRET}@id.example.com/`,
     `https://id.example.com/?token=${SECRET}`,
     `http://id.example.com/${SECRET}`,
     `not a url ${SECRET}`
-  ]) {
+  ];
+  const cases: [string, () => unknown][] = [
+    ...bad.map((value): [string, () => unknown] => [
+      'MCP_OAUTH_ISSUER',
+      () => resolveOAuthConfig({ ...base, MCP_OAUTH_ISSUER: value })
+    ]),
+    ...[...bad, `https://mcp.example.com/${SECRET}`].map((value): [string, () => unknown] => [
+      'MCP_PUBLIC_URL',
+      () => resolveOAuthConfig({ ...base, MCP_PUBLIC_URL: value })
+    ]),
+    ...bad.map((value): [string, () => unknown] => [
+      'ARGOCD_BASE_URL',
+      () => assertNoStaticCredentials({ ARGOCD_BASE_URL: value })
+    ])
+  ];
+  for (const [name, run] of cases) {
     assert.throws(
-      () => resolveOAuthConfig({ ...base, MCP_OAUTH_ISSUER: value }),
+      run,
       (error: unknown) =>
-        error instanceof Error &&
-        error.message.startsWith('MCP_OAUTH_ISSUER') &&
-        !error.message.includes(SECRET)
+        error instanceof Error && error.message.startsWith(name) && !error.message.includes(SECRET),
+      name
     );
   }
 });
 
-test('MCP_OAUTH_REQUIRE_AT_JWT is a strict boolean, off by default', () => {
-  assert.equal(resolveOAuthConfig(base)!.requireAtJwt, false);
+test('MCP_OAUTH_TOKEN_TYPE_CHECK defaults to at+jwt; scope must be chosen', () => {
+  assert.equal(resolveOAuthConfig(base)!.tokenTypeCheck, 'at+jwt');
   assert.equal(
-    resolveOAuthConfig({ ...base, MCP_OAUTH_REQUIRE_AT_JWT: 'TRUE' })!.requireAtJwt,
-    true
+    resolveOAuthConfig({ ...base, MCP_OAUTH_TOKEN_TYPE_CHECK: 'SCOPE' })!.tokenTypeCheck,
+    'scope'
   );
   assert.equal(
-    resolveOAuthConfig({ ...base, MCP_OAUTH_REQUIRE_AT_JWT: 'false' })!.requireAtJwt,
-    false
+    resolveOAuthConfig({ ...base, MCP_OAUTH_TOKEN_TYPE_CHECK: 'at+jwt' })!.tokenTypeCheck,
+    'at+jwt'
   );
-  assert.throws(
-    () => resolveOAuthConfig({ ...base, MCP_OAUTH_REQUIRE_AT_JWT: 'yes' }),
-    /MCP_OAUTH_REQUIRE_AT_JWT must be true or false/
-  );
+  for (const bad of ['none', 'true', 'jwt']) {
+    assert.throws(
+      () => resolveOAuthConfig({ ...base, MCP_OAUTH_TOKEN_TYPE_CHECK: bad }),
+      /MCP_OAUTH_TOKEN_TYPE_CHECK must be one of at\+jwt, scope/
+    );
+  }
 });
 
 // createTokenVerifier
@@ -354,9 +371,10 @@ const server: AuthorizationServer = {
 
 const verifier = (
   discover: () => Promise<AuthorizationServer> = async () => server,
-  requireAtJwt = false
+  // Most tests below are about the scope fallback; the at+jwt default has its own.
+  tokenTypeCheck: TokenTypeCheck = 'scope'
 ) =>
-  createTokenVerifier({ issuer: ISSUER, audience: AUDIENCE, requireAtJwt }, discover, () =>
+  createTokenVerifier({ issuer: ISSUER, audience: AUDIENCE, tokenTypeCheck }, discover, () =>
     createLocalJWKSet({ keys: [signer.publicJwk] })
   );
 
@@ -601,23 +619,34 @@ test('a Keycloak ID token (payload typ "ID") is refused even with a scope', asyn
   );
 });
 
-test('requireAtJwt: an at+jwt token is accepted, scope or not', async () => {
+test('at+jwt: an at+jwt token is accepted, scope or not', async () => {
   for (const typ of ['at+jwt', 'application/at+jwt']) {
-    const info = await verifier(undefined, true).verifyAccessToken(await sign({}, { typ }));
+    const info = await verifier(undefined, 'at+jwt').verifyAccessToken(await sign({}, { typ }));
     assert.equal(info.extra?.sub, 'user-1');
   }
-  const noScope = await verifier(undefined, true).verifyAccessToken(
+  const noScope = await verifier(undefined, 'at+jwt').verifyAccessToken(
     await sign({}, { typ: 'at+jwt', omit: ['scope'] })
   );
   assert.deepEqual(noScope.scopes, []);
 });
 
-test('requireAtJwt: a token without typ at+jwt is refused, even with a scope', async () => {
+test('at+jwt: a token without typ at+jwt is refused, even with a scope', async () => {
   for (const typ of [undefined, 'JWT']) {
     await assert.rejects(
-      async () => verifier(undefined, true).verifyAccessToken(await sign({}, { typ })),
+      async () => verifier(undefined, 'at+jwt').verifyAccessToken(await sign({}, { typ })),
       (error: unknown) =>
         error instanceof InvalidTokenError && /not an access token/.test(error.message)
     );
   }
+});
+
+test('a verifier given no token type check uses at+jwt', async () => {
+  const strict = createTokenVerifier(
+    { issuer: ISSUER, audience: AUDIENCE },
+    async () => server,
+    () => createLocalJWKSet({ keys: [signer.publicJwk] })
+  );
+  await assert.rejects(async () => strict.verifyAccessToken(await sign()), InvalidTokenError);
+  const info = await strict.verifyAccessToken(await sign({}, { typ: 'at+jwt' }));
+  assert.equal(info.extra?.sub, 'user-1');
 });

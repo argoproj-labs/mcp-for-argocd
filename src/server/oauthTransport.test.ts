@@ -172,7 +172,7 @@ const withEnv = async (
       scope: 'openid profile email',
       jti: claims.jti ?? `${Math.random()}`
     })
-      .setProtectedHeader({ alg: 'RS256', kid })
+      .setProtectedHeader({ alg: 'RS256', kid, typ: 'at+jwt' })
       .setIssuer(claims.iss ?? issuer)
       .setAudience(claims.aud ?? AUDIENCE)
       .setSubject(claims.sub ?? 'alice')
@@ -428,6 +428,7 @@ test('sends an RFC 8693 request to the token endpoint, without resource', async 
   assert.equal(form.get('client_id'), AUDIENCE);
   assert.equal(form.get('subject_token'), token);
   assert.equal(form.get('subject_token_type'), 'urn:ietf:params:oauth:token-type:access_token');
+  assert.equal(form.get('requested_token_type'), 'urn:ietf:params:oauth:token-type:access_token');
   assert.equal(form.get('audience'), EXCHANGE_AUDIENCE);
   assert.equal(form.get('scope'), 'openid profile email');
   assert.equal(form.has('resource'), false);

@@ -27,8 +27,17 @@ export const OAUTH_ENV = {
   exchangeAudience: 'ARGOCD_TOKEN_EXCHANGE_AUDIENCE',
   exchangeScope: 'ARGOCD_TOKEN_EXCHANGE_SCOPE',
   exchangeClientId: 'ARGOCD_TOKEN_EXCHANGE_CLIENT_ID',
-  requireAtJwt: 'MCP_OAUTH_REQUIRE_AT_JWT'
+  tokenTypeCheck: 'MCP_OAUTH_TOKEN_TYPE_CHECK'
 } as const;
+
+// How an access token is told apart from an ID token, which carries the same
+// issuer, audience, subject and expiry:
+// - at+jwt: the RFC 9068 header the issuer sets on access tokens only.
+// - scope: a scope claim, which access tokens carry and ID tokens normally do
+//   not. A fallback for issuers that set no at+jwt header (authentik 2026.8, for
+//   one); it holds only as long as the issuer keeps scope off its ID tokens.
+export type TokenTypeCheck = 'at+jwt' | 'scope';
+const TOKEN_TYPE_CHECKS: readonly TokenTypeCheck[] = ['at+jwt', 'scope'];
 
 // What the MCP client asks for when it signs the user in. offline_access gets it a
 // refresh token, so the browser does not open again every time the access token
@@ -54,9 +63,7 @@ export type OAuthConfig = {
   audience: string;
   publicUrl: URL;
   scopes: string[];
-  // Require the RFC 9068 access-token header (typ: at+jwt), for providers that
-  // set it. Off by default: authentik (2026.8), among others, does not.
-  requireAtJwt: boolean;
+  tokenTypeCheck: TokenTypeCheck;
   exchange: {
     audience: string;
     scope: string;
@@ -98,11 +105,12 @@ const secureUrl = (name: string, value: string): URL => {
 
 const words = (value: string): string[] => value.split(/\s+/).filter(Boolean);
 
-const booleanOf = (env: Env, name: string): boolean => {
-  const value = valueOf(env, name)?.toLowerCase();
-  if (value === undefined || value === 'false') return false;
-  if (value === 'true') return true;
-  throw new Error(`${name} must be true or false.`);
+// at+jwt unless the operator picks the scope fallback.
+const tokenTypeCheckOf = (env: Env): TokenTypeCheck => {
+  const value = valueOf(env, OAUTH_ENV.tokenTypeCheck)?.toLowerCase();
+  if (value === undefined) return 'at+jwt';
+  if ((TOKEN_TYPE_CHECKS as readonly string[]).includes(value)) return value as TokenTypeCheck;
+  throw new Error(`${OAUTH_ENV.tokenTypeCheck} must be one of ${TOKEN_TYPE_CHECKS.join(', ')}.`);
 };
 
 // Read the OAuth configuration from the environment. Returns undefined when none
@@ -134,7 +142,7 @@ export const resolveOAuthConfig = (env: Env = process.env): OAuthConfig | undefi
   if (publicUrl.pathname !== MCP_PATH) {
     throw new Error(
       `${OAUTH_ENV.publicUrl} must be the URL clients use for this server's ${MCP_PATH} endpoint, ` +
-        `e.g. https://argocd-mcp.example.com${MCP_PATH}; got ${publicUrl.href}. Serving it under ` +
+        `e.g. https://argocd-mcp.example.com${MCP_PATH}. Serving it under ` +
         'a path prefix behind a proxy is not supported.'
     );
   }
@@ -146,7 +154,7 @@ export const resolveOAuthConfig = (env: Env = process.env): OAuthConfig | undefi
     audience,
     publicUrl,
     scopes,
-    requireAtJwt: booleanOf(env, OAUTH_ENV.requireAtJwt),
+    tokenTypeCheck: tokenTypeCheckOf(env),
     exchange: {
       audience: valueOf(env, OAUTH_ENV.exchangeAudience)!,
       scope: words(valueOf(env, OAUTH_ENV.exchangeScope) ?? DEFAULT_EXCHANGE_SCOPE).join(' '),
@@ -283,10 +291,11 @@ export type TokenClaims = {
 // the SDK's requireBearerAuth answers with 401 and a WWW-Authenticate challenge;
 // clients refresh on 401 and on nothing else.
 export const createTokenVerifier = (
-  config: Pick<OAuthConfig, 'issuer' | 'audience'> & Partial<Pick<OAuthConfig, 'requireAtJwt'>>,
+  config: Pick<OAuthConfig, 'issuer' | 'audience'> & Partial<Pick<OAuthConfig, 'tokenTypeCheck'>>,
   discover: () => Promise<AuthorizationServer>,
   keySet?: (jwksUri: URL) => JWTVerifyGetKey
 ): OAuthTokenVerifier => {
+  const tokenTypeCheck = config.tokenTypeCheck ?? 'at+jwt';
   let keys: JWTVerifyGetKey | undefined;
   const makeKeySet =
     keySet ??
@@ -310,7 +319,7 @@ export const createTokenVerifier = (
           algorithms: ALLOWED_ALGORITHMS,
           requiredClaims: ['exp', 'sub'],
           // jose accepts application/at+jwt for this too.
-          ...(config.requireAtJwt ? { typ: 'at+jwt' } : {})
+          ...(tokenTypeCheck === 'at+jwt' ? { typ: 'at+jwt' } : {})
         }));
       } catch (error) {
         if (!isTokenError(error)) {
@@ -321,11 +330,12 @@ export const createTokenVerifier = (
 
       // An ID token from the same provider has the same issuer, audience, subject
       // and expiry, and travels more widely (id_token_hint on logout redirects).
-      // With requireAtJwt the header settles it (RFC 9068). Otherwise: access
-      // tokens carry the granted scope and ID tokens do not, in authentik 2026.8
-      // as in most providers, so require it; and Keycloak marks its ID tokens
-      // with typ "ID" in the payload.
-      if (!config.requireAtJwt && (typeof payload.scope !== 'string' || payload.typ === 'ID')) {
+      // at+jwt: the header, checked above, settles it. scope: require the claim
+      // access tokens carry, and refuse Keycloak's payload marker for ID tokens.
+      if (
+        tokenTypeCheck === 'scope' &&
+        (typeof payload.scope !== 'string' || payload.typ === 'ID')
+      ) {
         throw new InvalidTokenError('The token is not an access token');
       }
       const scope = typeof payload.scope === 'string' ? payload.scope : '';

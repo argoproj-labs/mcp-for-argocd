@@ -323,7 +323,7 @@ argocd-mcp ──Bearer (exchanged token)──► ArgoCD
 | `MCP_OAUTH_SCOPES` | no | `openid profile email offline_access` | The scopes clients are told to ask for. `offline_access` gives them a refresh token. |
 | `ARGOCD_TOKEN_EXCHANGE_SCOPE` | no | `openid profile email` | The scopes asked for in the exchange. It must include whatever puts the `groups` claim ArgoCD's RBAC reads into the token. |
 | `ARGOCD_TOKEN_EXCHANGE_CLIENT_ID` | no | defaults to `MCP_OAUTH_AUDIENCE` | The client ID the exchange is requested under. It must be a public client: no client secret is sent, so a confidential client (Keycloak's standard token exchange, for one) refuses the exchange. |
-| `MCP_OAUTH_REQUIRE_AT_JWT` | no | `false` | `true` requires the RFC 9068 access-token header (`typ: at+jwt`) and drops the `scope` check below. Turn it on only if your provider sets that header; authentik (2026.8) does not. |
+| `MCP_OAUTH_TOKEN_TYPE_CHECK` | no | `at+jwt` | How access tokens are told apart from ID tokens. `at+jwt` (the default) requires the RFC 9068 header `typ: at+jwt`. `scope` requires a `scope` claim instead, and refuses Keycloak's ID tokens (payload `typ: "ID"`): use it only for a provider that sets no `at+jwt` header, such as authentik (2026.8), and only if that provider keeps `scope` out of its ID tokens. |
 
 ```bash
 export MCP_OAUTH_ISSUER=https://id.example.com/application/o/argocd-mcp/
@@ -331,6 +331,8 @@ export MCP_OAUTH_AUDIENCE=argocd-mcp
 export MCP_PUBLIC_URL=https://argocd-mcp.example.com/mcp
 export ARGOCD_TOKEN_EXCHANGE_AUDIENCE=argocd
 export ARGOCD_BASE_URL=https://argocd.example.com
+# authentik sets no at+jwt header on access tokens; see MCP_OAUTH_TOKEN_TYPE_CHECK.
+export MCP_OAUTH_TOKEN_TYPE_CHECK=scope
 node dist/index.js http --bind-address 0.0.0.0 --allowed-host-header argocd-mcp.example.com
 ```
 
@@ -343,7 +345,7 @@ claude mcp add --transport http --client-id argocd-mcp argocd https://argocd-mcp
 What the server does:
 
 - Serves [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728) metadata at `/.well-known/oauth-protected-resource/mcp`, naming the issuer. A request without a valid token gets `401` with a `WWW-Authenticate` header pointing there, which is how the client knows where to sign in.
-- Validates each token against the issuer's key set: signature (asymmetric algorithms only), issuer, audience, expiry, `sub`, and a `scope` claim (or, with `MCP_OAUTH_REQUIRE_AT_JWT`, the `at+jwt` header), so ID tokens are refused. An expired token gets `401`, which is what makes clients refresh. A key set it cannot load gets `500`, not `401`, so an identity-provider outage does not send every client back to sign in.
+- Validates each token against the issuer's key set: signature (asymmetric algorithms only), issuer, audience, expiry, `sub`, and the `at+jwt` header (or, with `MCP_OAUTH_TOKEN_TYPE_CHECK=scope`, a `scope` claim), so ID tokens are refused. An expired token gets `401`, which is what makes clients refresh. A key set it cannot load gets `500`, not `401`, so an identity-provider outage does not send every client back to sign in.
 - Exchanges the token on the first tool call and keeps the result until 30 seconds before it expires. If ArgoCD answers `401` anyway, it exchanges once more and retries.
 - Ties each session to the user who opened it. Another user's session ID is treated as unknown. Each user holds at most 20 sessions.
 
@@ -360,6 +362,7 @@ The identity provider has to support the exchange, and register the MCP clients'
 - A public OAuth2 provider for the MCP server, with the grant type `urn:ietf:params:oauth:grant-type:token-exchange` and the redirect URIs of the clients (for Claude Code, `http://localhost:<port>/callback`).
 - ArgoCD's provider listing it in `jwt_federation_providers`.
 - The exchange asking for `profile`, which carries `groups`. authentik does not carry the scope over from the token being exchanged.
+- `MCP_OAUTH_TOKEN_TYPE_CHECK=scope`, since authentik sets no `at+jwt` header on access tokens. Its ID tokens carry no `scope` unless a custom scope mapping emits one with "Include claims in id_token" on, so leave that combination out.
 
 ### Read Only Mode
 

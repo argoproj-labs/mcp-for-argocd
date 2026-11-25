@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { after, before, beforeEach, test } from 'node:test';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { HttpClient, HttpError } from './http.js';
+import { HttpClient, HttpError, pathSegment } from './http.js';
+import { ArgoCDClient } from './client.js';
 
 // The one-shot retry on 401 that lets a short-lived exchanged token be replaced.
 
@@ -25,7 +26,11 @@ before(async () => {
       seen.push({ method: req.method, auth, body: Buffer.concat(chunks).toString('utf8') });
       seenPaths.push(req.url ?? '');
       res.setHeader('content-type', 'application/json');
-      if (req.url === '/missing') {
+      if (req.url?.endsWith('/redirect')) {
+        res.statusCode = 302;
+        res.setHeader('location', '/api/v1/x');
+        res.end();
+      } else if (req.url === '/missing') {
         res.statusCode = 404;
         res.end(JSON.stringify({ error: 'not found', message: 'application not found' }));
       } else if (auth === `Bearer ${GOOD}`) {
@@ -178,4 +183,45 @@ test('a non-2xx answer other than 401 is thrown with its message', async () => {
     assert.match(error.message, /ArgoCD answered 404.*application not found/);
     return true;
   });
+});
+
+test('pathSegment encodes a name as one segment and refuses dot segments', () => {
+  assert.equal(pathSegment('my-app'), 'my-app');
+  assert.equal(pathSegment('a/b'), 'a%2Fb');
+  assert.equal(pathSegment('a?b#c'), 'a%3Fb%23c');
+  assert.equal(pathSegment('%2e%2e'), '%252e%252e');
+  assert.equal(pathSegment('..%2f..'), '..%252f..');
+  for (const bad of ['', '.', '..']) {
+    assert.throws(() => pathSegment(bad), /cannot be used in a URL path/);
+  }
+});
+
+test('absUrl refuses anything that resolves outside the base URL', () => {
+  const client = new HttpClient('https://host/argocd', GOOD);
+  for (const url of [
+    '/api/v1/applications/../../../../x',
+    'https://other.example/api/v1/x',
+    'https://host/x',
+    'https://host/argocd2/api/v1/x',
+    'http://host/argocd/api/v1/x'
+  ]) {
+    assert.throws(() => client.absUrl(url), /outside ARGOCD_BASE_URL/, url);
+  }
+  assert.equal(client.absUrl('https://host/argocd/api/v1/x').href, 'https://host/argocd/api/v1/x');
+});
+
+test('a hostile application name never reaches the wire', async () => {
+  const client = new ArgoCDClient(`${baseUrl}/argocd`, GOOD);
+  for (const name of ['..', '.', '']) {
+    await assert.rejects(client.getApplication(name), /cannot be used in a URL path/);
+  }
+  // Encoded, so it stays one segment under the prefix.
+  await client.getApplication('../../x');
+  assert.deepEqual(seenPaths.slice(-1), ['/argocd/api/v1/applications/..%2F..%2Fx']);
+});
+
+test('a redirect is refused, not followed with the token', async () => {
+  const client = new HttpClient(baseUrl, GOOD);
+  await assert.rejects(client.get('/redirect'), /redirect, which is not followed/);
+  assert.equal(seen.length, 1);
 });

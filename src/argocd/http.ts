@@ -32,6 +32,17 @@ export class HttpError extends Error {
   }
 }
 
+// A caller-supplied name (an application, a project, a pod) as one URL path
+// segment. Encoded, so '/', '?', '#' and '%' cannot add segments or move the rest
+// of the path into the query; '.' and '..' are refused outright because URL
+// resolution would collapse them and walk out of ArgoCD's path prefix.
+export const pathSegment = (value: string): string => {
+  if (value === '' || value === '.' || value === '..') {
+    throw new Error(`Invalid name ${JSON.stringify(value)}: it cannot be used in a URL path.`);
+  }
+  return encodeURIComponent(value);
+};
+
 type SearchParams = Record<string, string | number | boolean | undefined | null> | null;
 
 export type HttpClientOptions = {
@@ -62,7 +73,27 @@ export class HttpClient {
   }
 
   private async send(url: URL, init?: RequestInit): Promise<Response> {
-    const attempt = () => fetch(url, { ...init, headers: { ...init?.headers, ...this.headers } });
+    // No redirects: fetch keeps Authorization on a same-origin redirect, which
+    // could carry the token to another backend behind the same host. ArgoCD's API
+    // answers directly.
+    const attempt = async () => {
+      try {
+        return await fetch(url, {
+          ...init,
+          redirect: 'error',
+          headers: { ...init?.headers, ...this.headers }
+        });
+      } catch (error) {
+        const cause = (error as { cause?: { message?: unknown } } | undefined)?.cause;
+        if (typeof cause?.message === 'string' && cause.message.includes('redirect')) {
+          throw new Error(
+            'ArgoCD answered with a redirect, which is not followed. Check ARGOCD_BASE_URL ' +
+              '(scheme, host and path prefix).'
+          );
+        }
+        throw error;
+      }
+    };
     const response = await attempt();
     if (response.status !== 401 || !this.onUnauthorized) return response;
     let fresh: string | undefined;
@@ -141,13 +172,20 @@ export class HttpClient {
 
   // Resolved under the base URL's path, so ArgoCD served under a prefix
   // (https://host/argocd) gets /argocd/api/v1/..., not /api/v1/... on whatever
-  // else shares the host.
+  // else shares the host. Whatever the path, the result must stay under the base
+  // URL: the token is attached to every request.
   absUrl(url: string): URL {
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      return new URL(url);
+    const base = new URL(this.baseUrl);
+    base.search = '';
+    base.hash = '';
+    if (!base.pathname.endsWith('/')) base.pathname += '/';
+    const resolved = /^https?:\/\//.test(url)
+      ? new URL(url)
+      : new URL(url.replace(/^\/+/, ''), base);
+    if (resolved.origin !== base.origin || !resolved.pathname.startsWith(base.pathname)) {
+      throw new Error('Refusing to send the ArgoCD token outside ARGOCD_BASE_URL.');
     }
-    const base = this.baseUrl.endsWith('/') ? this.baseUrl : `${this.baseUrl}/`;
-    return new URL(url.replace(/^\/+/, ''), base);
+    return resolved;
   }
 
   async get<R>(url: string, params?: SearchParams): Promise<HttpResponse<R>> {
