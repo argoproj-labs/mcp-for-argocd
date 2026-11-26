@@ -185,14 +185,42 @@ test('a non-2xx answer other than 401 is thrown with its message', async () => {
   });
 });
 
-test('pathSegment encodes a name as one segment and refuses dot segments', () => {
-  assert.equal(pathSegment('my-app'), 'my-app');
-  assert.equal(pathSegment('a/b'), 'a%2Fb');
-  assert.equal(pathSegment('a?b#c'), 'a%3Fb%23c');
-  assert.equal(pathSegment('%2e%2e'), '%252e%252e');
-  assert.equal(pathSegment('..%2f..'), '..%252f..');
-  for (const bad of ['', '.', '..']) {
-    assert.throws(() => pathSegment(bad), /cannot be used in a URL path/);
+// Names that are not Kubernetes object names, including ones that a proxy
+// decoding '%2F' and resolving '..' would route outside ArgoCD's path prefix.
+const INVALID_NAMES = [
+  '',
+  '.',
+  '..',
+  'a/b',
+  '../x',
+  'a/../../x',
+  'a/../../../../other/api/x',
+  'a%2Fb',
+  '%2e%2e',
+  '..%2f..',
+  'a\\..\\x',
+  'a?b#c',
+  'a b',
+  'a\nb',
+  'a\n',
+  'My-App',
+  'a_b',
+  '-a',
+  'a-',
+  '.a',
+  'a.',
+  'a..b',
+  'a.-b',
+  'ä',
+  'a'.repeat(254)
+];
+
+test('pathSegment accepts Kubernetes object names and refuses everything else', () => {
+  for (const good of ['my-app', 'guestbook', 'app-1.prod', 'a', '0', 'a'.repeat(253)]) {
+    assert.equal(pathSegment(good), good);
+  }
+  for (const bad of INVALID_NAMES) {
+    assert.throws(() => pathSegment(bad), /cannot be used in a URL path/, JSON.stringify(bad));
   }
 });
 
@@ -210,14 +238,22 @@ test('absUrl refuses anything that resolves outside the base URL', () => {
   assert.equal(client.absUrl('https://host/argocd/api/v1/x').href, 'https://host/argocd/api/v1/x');
 });
 
-test('a hostile application name never reaches the wire', async () => {
+test('an invalid name is refused before fetch is called', async (t) => {
   const client = new ArgoCDClient(`${baseUrl}/argocd`, GOOD);
-  for (const name of ['..', '.', '']) {
-    await assert.rejects(client.getApplication(name), /cannot be used in a URL path/);
+  const fetchSpy = t.mock.method(globalThis, 'fetch');
+  const pathsBefore = seenPaths.length;
+  for (const name of INVALID_NAMES) {
+    const label = JSON.stringify(name);
+    await assert.rejects(client.getApplication(name), /cannot be used in a URL path/, label);
+    await assert.rejects(client.getAppProject(name), /cannot be used in a URL path/, label);
   }
-  // Encoded, so it stays one segment under the prefix.
-  await client.getApplication('../../x');
-  assert.deepEqual(seenPaths.slice(-1), ['/argocd/api/v1/applications/..%2F..%2Fx']);
+  assert.equal(fetchSpy.mock.callCount(), 0);
+  assert.equal(seenPaths.length, pathsBefore);
+
+  // A valid name still goes out, as one segment under the prefix.
+  await client.getApplication('guestbook');
+  assert.equal(fetchSpy.mock.callCount(), 1);
+  assert.deepEqual(seenPaths.slice(pathsBefore), ['/argocd/api/v1/applications/guestbook']);
 });
 
 test('a redirect is refused, not followed with the token', async () => {

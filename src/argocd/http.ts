@@ -32,13 +32,26 @@ export class HttpError extends Error {
   }
 }
 
+// Kubernetes object names (Application, AppProject and Pod names among them)
+// are DNS-1123 subdomains: lowercase letters, digits, '-' and '.', every
+// dot-separated label starting and ending with a letter or digit, and at most
+// 253 characters.
+const K8S_NAME = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+const K8S_NAME_MAX_LENGTH = 253;
+
 // A caller-supplied name (an application, a project, a pod) as one URL path
-// segment. Encoded, so '/', '?', '#' and '%' cannot add segments or move the rest
-// of the path into the query; '.' and '..' are refused outright because URL
-// resolution would collapse them and walk out of ArgoCD's path prefix.
+// segment. Only a valid Kubernetes object name is accepted, so the name can hold
+// no '/', '%', '\' or '.'/'..' segment. Encoding alone is not enough: absUrl's
+// prefix check sees '%2F', but a proxy in front of ArgoCD (nginx, for one) can
+// decode it and resolve '..' before routing, sending the request and its token
+// to another backend on the same host. The name is still encoded as a second
+// layer, which leaves a valid name unchanged.
 export const pathSegment = (value: string): string => {
-  if (value === '' || value === '.' || value === '..') {
-    throw new Error(`Invalid name ${JSON.stringify(value)}: it cannot be used in a URL path.`);
+  if (value.length > K8S_NAME_MAX_LENGTH || !K8S_NAME.test(value)) {
+    throw new Error(
+      `Invalid name ${JSON.stringify(value)}: it is not a Kubernetes object name ` +
+        `(lowercase letters, digits, '-' and '.'), so it cannot be used in a URL path.`
+    );
   }
   return encodeURIComponent(value);
 };
