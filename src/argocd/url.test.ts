@@ -51,6 +51,14 @@ test('buildArgoCDUrl rejects non-http protocols, embedded credentials, and trave
     PathValidationError
   );
   assert.throws(
+    () => normalizeBaseUrlPrefix('https://user:super-secret@bad host/?token=leak-me'),
+    (err) =>
+      err instanceof PathValidationError &&
+      err.message === 'Invalid Argo CD base URL.' &&
+      !err.message.includes('super-secret') &&
+      !err.message.includes('leak-me')
+  );
+  assert.throws(
     () => buildArgoCDUrl('https://argo.example.com/argocd', '../other'),
     PathValidationError
   );

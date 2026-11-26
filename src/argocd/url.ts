@@ -30,7 +30,7 @@ export const normalizeBaseUrlPrefix = (baseUrl: string): { origin: string; baseP
   try {
     parsed = new URL(trimmed);
   } catch {
-    throw new PathValidationError('argocdBaseUrl', `Invalid Argo CD base URL: "${baseUrl}".`);
+    throw new PathValidationError('argocdBaseUrl', 'Invalid Argo CD base URL.');
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new PathValidationError(

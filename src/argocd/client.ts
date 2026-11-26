@@ -139,7 +139,8 @@ export class ArgoCDClient {
 
     const { body } = await this.client.delete<V1alpha1Application>(
       `api/v1/applications/${appSeg}`,
-      Object.keys(queryParams).length > 0 ? queryParams : undefined
+      Object.keys(queryParams).length > 0 ? queryParams : undefined,
+      { allowEmptyBody: true }
     );
     return body;
   }
@@ -356,7 +357,8 @@ export class ArgoCDClient {
         kind: resourceRef.kind,
         version: resourceRef.version
       },
-      action
+      action,
+      { allowEmptyBody: true }
     );
     return body;
   }

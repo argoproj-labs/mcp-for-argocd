@@ -13,7 +13,11 @@ const startStubArgoCD = async (
   const { port } = server.address() as AddressInfo;
   return {
     baseUrl: `http://127.0.0.1:${port}/argocd`,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve()))
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      })
   };
 };
 
@@ -107,14 +111,30 @@ test('HttpClient surfaces non-2xx JSON and plain-text responses as typed ArgoCDA
   }
 });
 
-test('HttpClient.getStream flushes trailing NDJSON line without newline and surfaces stream errors', async () => {
+test('HttpClient.getStream flushes trailing NDJSON line without newline and surfaces RuntimeStreamError before and after first line', async () => {
+  const forbiddenPayload = {
+    error: {
+      grpc_code: 7,
+      http_code: 403,
+      http_status: 'Forbidden',
+      message: 'permission denied: applications, logs, default/demo-app'
+    }
+  };
+
   const stub = await startStubArgoCD((req, res) => {
-    res.statusCode = 200;
     res.setHeader('Content-Type', 'application/json');
-    if (req.url?.includes('/stream-err/')) {
-      res.end(JSON.stringify({ error: { code: 7, message: 'permission denied' } }));
+    if (req.url?.includes('/forbidden-before-line/')) {
+      res.statusCode = 403;
+      res.end(JSON.stringify(forbiddenPayload));
       return;
     }
+    if (req.url?.includes('/forbidden-mid-stream/')) {
+      res.statusCode = 200;
+      res.write(JSON.stringify({ result: { content: 'line-1' } }) + '\n');
+      res.end(JSON.stringify(forbiddenPayload));
+      return;
+    }
+    res.statusCode = 200;
     res.write(JSON.stringify({ result: { content: 'line-1' } }) + '\n');
     // Omit trailing newline to verify final buffer flush
     res.end(JSON.stringify({ result: { content: 'line-2' } }));
@@ -128,13 +148,151 @@ test('HttpClient.getStream flushes trailing NDJSON line without newline and surf
       ['line-1', 'line-2']
     );
 
+    // Non-2xx stream error before first log line (e.g. get_application_workload_logs 403)
     await assert.rejects(
-      () => client.getApplicationLogs('stream-err'),
+      () =>
+        client.getWorkloadLogs(
+          'forbidden-before-line',
+          'argocd',
+          { name: 'web', namespace: 'default', kind: 'Deployment', group: 'apps', version: 'v1' },
+          'web'
+        ),
       (err) =>
         err instanceof ArgoCDApiError &&
+        err.status === 403 &&
+        err.argoCode === 7 &&
+        err.message.includes('permission denied') &&
+        !err.message.includes('[object Object]')
+    );
+
+    // Mid-stream RuntimeStreamError after first log line on HTTP 200
+    await assert.rejects(
+      () => client.getApplicationLogs('forbidden-mid-stream'),
+      (err) =>
+        err instanceof ArgoCDApiError &&
+        err.status === 403 &&
         err.argoCode === 7 &&
         err.message.includes('permission denied')
     );
+  } finally {
+    await stub.close();
+  }
+});
+
+test('HttpClient.getStream cancels upstream reader when a mid-stream error occurs before EOF', async () => {
+  let resolveClosed!: () => void;
+  const upstreamClosed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
+
+  const stub = await startStubArgoCD((_req, res) => {
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json');
+    res.on('close', () => {
+      resolveClosed();
+    });
+    res.write(JSON.stringify({ result: { content: 'line-1' } }) + '\n');
+    res.write(
+      JSON.stringify({
+        error: {
+          grpc_code: 7,
+          http_code: 403,
+          http_status: 'Forbidden',
+          message: 'stream permission denied'
+        }
+      }) + '\n'
+    );
+    // Intentionally keep the response open without calling res.end()
+  });
+
+  try {
+    const client = new ArgoCDClient(stub.baseUrl, 'test-token');
+    await assert.rejects(
+      () => client.getApplicationLogs('open-stream-err'),
+      (err) =>
+        err instanceof ArgoCDApiError &&
+        err.status === 403 &&
+        err.argoCode === 7 &&
+        err.message.includes('stream permission denied')
+    );
+
+    await Promise.race([
+      upstreamClosed,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('upstream stream was not cancelled before EOF')), 2000)
+      )
+    ]);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('HttpClient rejects unexpected empty 200 bodies while allowing empty bodies where expected', async () => {
+  const stub = await startStubArgoCD((req, res) => {
+    if (req.method === 'DELETE') {
+      res.statusCode = 200;
+      res.end('');
+      return;
+    }
+    if (req.method === 'POST' && req.url?.includes('/resource/actions')) {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+    res.statusCode = 200;
+    res.end('');
+  });
+
+  try {
+    const client = new ArgoCDClient(stub.baseUrl, 'test-token');
+    await assert.rejects(
+      () => client.listApplications(),
+      (err) => err instanceof ArgoCDApiError && err.status === 200 && err.message.includes('empty')
+    );
+
+    const deleted = await client.deleteApplication('demo-app');
+    assert.deepEqual(deleted, {});
+
+    const actionResult = await client.runResourceAction(
+      'demo-app',
+      'argocd',
+      { name: 'web', namespace: 'default', kind: 'Deployment', group: 'apps', version: 'v1' },
+      'restart'
+    );
+    assert.deepEqual(actionResult, {});
+  } finally {
+    await stub.close();
+  }
+});
+
+test('HttpClient rejects redirects without forwarding Authorization outside basePath', async () => {
+  let leakedRequests = 0;
+
+  const stub = await startStubArgoCD((req, res) => {
+    if (req.url?.startsWith('/other-service')) {
+      leakedRequests += 1;
+      res.statusCode = 200;
+      res.end(JSON.stringify({ items: [] }));
+      return;
+    }
+    res.statusCode = 302;
+    res.setHeader('Location', '/other-service/steal-token');
+    res.end();
+  });
+
+  try {
+    const client = new ArgoCDClient(stub.baseUrl, 'secret-argocd-token');
+    await assert.rejects(
+      () => client.listApplications(),
+      (err) =>
+        err instanceof ArgoCDApiError && err.status === 302 && err.message.includes('redirect')
+    );
+    await assert.rejects(
+      () => client.getApplicationLogs('demo-app'),
+      (err) =>
+        err instanceof ArgoCDApiError && err.status === 302 && err.message.includes('redirect')
+    );
+    assert.equal(leakedRequests, 0);
   } finally {
     await stub.close();
   }
