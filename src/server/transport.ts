@@ -17,7 +17,7 @@ import {
 // Load the base-URL -> token registry once at startup from the JSON file at
 // ARGOCD_TOKEN_REGISTRY_PATH. Shared across all connections; read-only after
 // construction.
-const tokenRegistry = tokenRegistryFromEnv();
+export const tokenRegistry = tokenRegistryFromEnv();
 
 export const connectStdioTransport = () => {
   const server = createServer({

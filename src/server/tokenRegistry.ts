@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { logger } from '../logging/logging.js';
+import type { TlsOptions } from '../argocd/http.js';
 
 // A read-only registry that maps an ArgoCD base URL to the API token that
 // should be used for it. It lets a single server target multiple ArgoCD
@@ -19,10 +20,13 @@ import { logger } from '../logging/logging.js';
 //     {"baseUrl":"https://argo-b.example.com","token":"<token-b>"}
 //   ]
 //
+// An entry may also carry TLS options (clientCrt, clientCrtKey, serverCrt,
+// insecure) that apply to its base URL only.
+//
 // Base URLs are normalized (lowercased host, trailing slashes stripped) so
 // trivial formatting differences between the configured value and the requested
 // value don't cause a lookup miss.
-export type TokenRegistryEntry = {
+export type TokenRegistryEntry = TlsOptions & {
   baseUrl: string;
   token: string;
 };
@@ -30,12 +34,21 @@ export type TokenRegistryEntry = {
 export class TokenRegistry {
   private tokensByBaseUrl = new Map<string, string>();
 
-  constructor(entries: TokenRegistryEntry[] = []) {
+  constructor(public readonly entries: TokenRegistryEntry[] = []) {
     for (const entry of entries) {
       if (!entry.baseUrl || !entry.token) {
         // Fail closed: a missing baseUrl/token is a misconfigured credential,
         // not something to silently skip. Don't include the token in the error.
         throw new Error('ArgoCD token registry entry is missing baseUrl or token');
+      }
+      // Fail closed on mistyped TLS options: "insecure": "false" is truthy.
+      for (const key of ['clientCrt', 'clientCrtKey', 'serverCrt'] as const) {
+        if (entry[key] !== undefined && typeof entry[key] !== 'string') {
+          throw new Error(`ArgoCD token registry entry ${key} must be a string`);
+        }
+      }
+      if (entry.insecure !== undefined && typeof entry.insecure !== 'boolean') {
+        throw new Error('ArgoCD token registry entry insecure must be a boolean');
       }
       this.tokensByBaseUrl.set(TokenRegistry.normalize(entry.baseUrl), entry.token);
     }

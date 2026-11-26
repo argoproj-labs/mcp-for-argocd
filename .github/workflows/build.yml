@@ -27,3 +27,11 @@ jobs:
         run: pnpm test
       - name: Create npm package
         run: pnpm pack
+      - name: Build
+        run: pnpm build
+      # README documents Node 18 support; make sure the CLI still starts there.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+      - name: Startup check on Node 18
+        run: node dist/index.js --help
