@@ -49,6 +49,7 @@ The server provides the following ArgoCD management tools:
 - `get_application_events`: Get events for a specific application
 - `create_application`: Create a new application
 - `update_application`: Update an existing application
+- `set_helm_parameters`: Upsert Helm parameters by name without removing the others
 - `delete_application`: Delete an application
 - `sync_application`: Trigger a sync operation on an application
 
@@ -309,6 +310,7 @@ If you want to run the MCP Server in a ReadOnly mode to avoid resource or applic
 This will disable the following tools:
 - `create_application`
 - `update_application`
+- `set_helm_parameters`
 - `delete_application`
 - `sync_application`
 - `run_resource_action`

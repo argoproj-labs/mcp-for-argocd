@@ -12,6 +12,7 @@ import {
   V1alpha1AppProject
 } from '../types/argocd-types.js';
 import { HttpClient } from './http.js';
+import { HelmParameterUpdate, upsertHelmParameters } from './helm-parameters.js';
 
 export class ArgoCDClient {
   private baseUrl: string;
@@ -110,6 +111,56 @@ export class ArgoCDClient {
       application
     );
     return body;
+  }
+
+  // Merge-patch only spec.source.helm.parameters. A JSON merge patch replaces
+  // arrays, so the patch carries the full list after the named values are
+  // updated. valueFiles, values, and unnamed parameters stay as they were.
+  public async setHelmParameters(
+    applicationName: string,
+    updates: HelmParameterUpdate[],
+    appNamespace?: string
+  ) {
+    const app = await this.getApplication(applicationName, appNamespace);
+    if (!app.spec?.source) {
+      throw new Error(
+        `application ${applicationName} has no spec.source; set_helm_parameters only updates spec.source.helm.parameters`
+      );
+    }
+    const current = app.spec.source.helm?.parameters;
+    if (current !== undefined && !Array.isArray(current)) {
+      throw new Error(`application ${applicationName} helm.parameters is not a list`);
+    }
+    const parameters = upsertHelmParameters(current, updates);
+    const patch = {
+      spec: {
+        source: {
+          helm: {
+            parameters
+          }
+        }
+      }
+    };
+    const query: Record<string, string | boolean> = { validate: true };
+    if (appNamespace) {
+      query.appNamespace = appNamespace;
+    }
+    const { status, body } = await this.client.patch<
+      { patch: string; patchType: string },
+      V1alpha1Application
+    >(`/api/v1/applications/${applicationName}`, query, {
+      patch: JSON.stringify(patch),
+      patchType: 'merge'
+    });
+    if (status < 200 || status >= 300) {
+      throw new Error(
+        `Argo CD rejected helm parameter update for ${applicationName}: ${status} ${JSON.stringify(body).slice(0, 500)}`
+      );
+    }
+    return {
+      applicationName,
+      parameters: body.spec?.source?.helm?.parameters ?? parameters
+    };
   }
 
   public async deleteApplication(
