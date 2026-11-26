@@ -19,9 +19,11 @@ import {
 // ARGOCD_TOKEN_REGISTRY_PATH. Shared across all connections; read-only after
 // construction.
 const tokenRegistry = tokenRegistryFromEnv();
-const extraHeaders = extraHeadersFromEnv();
 
+// Read inside each connect function, not at module scope: ESM evaluates this
+// module before index.ts calls dotenv.config(), so a value in .env would be missed.
 export const connectStdioTransport = () => {
+  const extraHeaders = extraHeadersFromEnv();
   const server = createServer({
     argocdBaseUrl: process.env.ARGOCD_BASE_URL || '',
     argocdApiToken: process.env.ARGOCD_API_TOKEN || '',
@@ -97,6 +99,7 @@ const resolveCredentials = (
 };
 
 export const connectSSETransport = (options: TransportOptions) => {
+  const extraHeaders = extraHeadersFromEnv();
   const security = resolveListenerSecurity(options);
   const { port } = options;
   const app = express();
@@ -136,6 +139,7 @@ export const connectSSETransport = (options: TransportOptions) => {
 export const connectHttpTransport = (
   options: TransportOptions & { stateless?: boolean; jsonResponse?: boolean }
 ) => {
+  const extraHeaders = extraHeadersFromEnv();
   const security = resolveListenerSecurity(options);
   const { port, stateless = false, jsonResponse = false } = options;
   // In JSON mode the SDK keeps every finished response on a long-lived transport, and
