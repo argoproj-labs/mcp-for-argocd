@@ -7,7 +7,8 @@ import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import { tokenRegistryFromEnv } from './tokenRegistry.js';
+import { TokenRegistry, tokenRegistryFromEnv } from './tokenRegistry.js';
+import { login } from '../argocd/http.js';
 import {
   applyListenerSecurity,
   resolveListenerSecurity,
@@ -19,10 +20,17 @@ import {
 // construction.
 const tokenRegistry = tokenRegistryFromEnv();
 
-export const connectStdioTransport = () => {
+export const connectStdioTransport = async () => {
+  const argocdBaseUrl = process.env.ARGOCD_BASE_URL || '';
+  const argocdApiToken = await resolveApiToken(
+    argocdBaseUrl,
+    process.env.ARGOCD_API_TOKEN || '',
+    process.env.ARGOCD_USERNAME || '',
+    process.env.ARGOCD_PASSWORD || ''
+  );
   const server = createServer({
-    argocdBaseUrl: process.env.ARGOCD_BASE_URL || '',
-    argocdApiToken: process.env.ARGOCD_API_TOKEN || '',
+    argocdBaseUrl,
+    argocdApiToken,
     tokenRegistry
   });
 
@@ -57,11 +65,54 @@ const listen = (app: express.Express, bindAddress: string, port: number, label: 
   return server;
 };
 
+// A username/password credential is exchanged for a session token once here, so
+// everywhere downstream still only ever deals with a token (ARGOCD_API_TOKEN's
+// shape). Not used when an API token was already supplied — the token wins.
+// Requires a base URL, since the login call has to go somewhere.
+const resolveApiToken = async (
+  argocdBaseUrl: string,
+  argocdApiToken: string,
+  username: string,
+  password: string
+): Promise<string> => {
+  if (argocdApiToken || !username || !password) return argocdApiToken;
+  if (!argocdBaseUrl) {
+    throw new Error(
+      'ARGOCD_BASE_URL (or x-argocd-base-url) is required to log in with a username and password.'
+    );
+  }
+  return login(argocdBaseUrl, username, password);
+};
+
+// The env username/password belong to ARGOCD_BASE_URL: never pair them with a
+// header-supplied base URL (the password would be sent to the caller's host) or
+// mix them with a header username/password.
+export const loginCredentials = (
+  headers: Record<string, string | string[] | undefined>,
+  env: NodeJS.ProcessEnv = process.env
+): { username: string; password: string } => {
+  const headerBaseUrl = headers['x-argocd-base-url'] as string | undefined;
+  const headerUsername = headers['x-argocd-username'] as string | undefined;
+  const headerPassword = headers['x-argocd-password'] as string | undefined;
+  const useEnv =
+    !headerUsername &&
+    !headerPassword &&
+    (!headerBaseUrl ||
+      TokenRegistry.normalize(headerBaseUrl) ===
+        TokenRegistry.normalize(env.ARGOCD_BASE_URL || ''));
+  return useEnv
+    ? { username: env.ARGOCD_USERNAME || '', password: env.ARGOCD_PASSWORD || '' }
+    : { username: headerUsername || '', password: headerPassword || '' };
+};
+
 // Resolve the session-level ArgoCD credentials from headers or env.
 //
 // The API token is only ever accepted here (x-argocd-api-token header or
 // ARGOCD_API_TOKEN env var) — never as a tool-call argument — so the secret
-// stays in the transport layer and out of prompts/model context.
+// stays in the transport layer and out of prompts/model context. A
+// username/password pair (x-argocd-username/x-argocd-password headers or
+// ARGOCD_USERNAME/ARGOCD_PASSWORD env vars) is accepted the same way and
+// exchanged for a token via resolveApiToken.
 //
 // The token is normally MANDATORY and the connection is rejected when it is
 // missing. The exception is when a token registry (ARGOCD_TOKEN_REGISTRY_PATH)
@@ -73,19 +124,29 @@ const listen = (app: express.Express, bindAddress: string, port: number, label: 
 //
 // These are outbound credentials only. Inbound authorization is the listener's
 // job (MCP_AUTH_TOKEN, see security.ts).
-const resolveCredentials = (
+const resolveCredentials = async (
   req: express.Request,
   res: express.Response
-): { argocdBaseUrl: string; argocdApiToken: string } | null => {
+): Promise<{ argocdBaseUrl: string; argocdApiToken: string } | null> => {
   const argocdBaseUrl =
     (req.headers['x-argocd-base-url'] as string) || process.env.ARGOCD_BASE_URL || '';
-  const argocdApiToken =
+  let argocdApiToken =
     (req.headers['x-argocd-api-token'] as string) || process.env.ARGOCD_API_TOKEN || '';
+
+  const { username, password } = loginCredentials(req.headers);
+  try {
+    argocdApiToken = await resolveApiToken(argocdBaseUrl, argocdApiToken, username, password);
+  } catch (error) {
+    res.status(401).send(error instanceof Error ? error.message : String(error));
+    return null;
+  }
+
   if (!argocdApiToken && tokenRegistry.getSize() === 0) {
     res
       .status(400)
       .send(
         'x-argocd-api-token must be provided in the request header (or the ARGOCD_API_TOKEN env var), ' +
+          'x-argocd-username/x-argocd-password (or ARGOCD_USERNAME/ARGOCD_PASSWORD) must be provided, ' +
           'or a token registry must be configured via ARGOCD_TOKEN_REGISTRY_PATH.'
       );
     return null;
@@ -105,7 +166,7 @@ export const connectSSETransport = (options: TransportOptions) => {
     // Same credential requirement as the http transport. Without it the handler
     // built an McpServer with empty credentials and held it until the socket
     // closed, one per connection.
-    const credentials = resolveCredentials(req, res);
+    const credentials = await resolveCredentials(req, res);
     if (!credentials) return;
     const server = createServer({ ...credentials, tokenRegistry });
 
@@ -157,7 +218,7 @@ export const connectHttpTransport = (
     if (!stateless && sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
       transport = httpTransports[sessionIdFromHeader];
     } else if (stateless || (!sessionIdFromHeader && isInitializeRequest(req.body))) {
-      const credentials = resolveCredentials(req, res);
+      const credentials = await resolveCredentials(req, res);
       if (!credentials) return;
 
       transport = new StreamableHTTPServerTransport(
