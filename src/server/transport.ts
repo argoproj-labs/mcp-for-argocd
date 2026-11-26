@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { extraHeadersFromEnv } from '../argocd/extraHeaders.js';
 import { tokenRegistryFromEnv } from './tokenRegistry.js';
 import {
   applyListenerSecurity,
@@ -19,11 +20,15 @@ import {
 // construction.
 const tokenRegistry = tokenRegistryFromEnv();
 
+// Read inside each connect function, not at module scope: ESM evaluates this
+// module before index.ts calls dotenv.config(), so a value in .env would be missed.
 export const connectStdioTransport = () => {
+  const extraHeaders = extraHeadersFromEnv();
   const server = createServer({
     argocdBaseUrl: process.env.ARGOCD_BASE_URL || '',
     argocdApiToken: process.env.ARGOCD_API_TOKEN || '',
-    tokenRegistry
+    tokenRegistry,
+    extraHeaders
   });
 
   logger.info('Connecting to stdio transport');
@@ -94,6 +99,7 @@ const resolveCredentials = (
 };
 
 export const connectSSETransport = (options: TransportOptions) => {
+  const extraHeaders = extraHeadersFromEnv();
   const security = resolveListenerSecurity(options);
   const { port } = options;
   const app = express();
@@ -107,7 +113,7 @@ export const connectSSETransport = (options: TransportOptions) => {
     // closed, one per connection.
     const credentials = resolveCredentials(req, res);
     if (!credentials) return;
-    const server = createServer({ ...credentials, tokenRegistry });
+    const server = createServer({ ...credentials, tokenRegistry, extraHeaders });
 
     const transport = new SSEServerTransport('/messages', res);
     transports[transport.sessionId] = transport;
@@ -133,6 +139,7 @@ export const connectSSETransport = (options: TransportOptions) => {
 export const connectHttpTransport = (
   options: TransportOptions & { stateless?: boolean; jsonResponse?: boolean }
 ) => {
+  const extraHeaders = extraHeadersFromEnv();
   const security = resolveListenerSecurity(options);
   const { port, stateless = false, jsonResponse = false } = options;
   // In JSON mode the SDK keeps every finished response on a long-lived transport, and
@@ -177,7 +184,7 @@ export const connectHttpTransport = (
         };
       }
 
-      const server = createServer({ ...credentials, tokenRegistry });
+      const server = createServer({ ...credentials, tokenRegistry, extraHeaders });
       await server.connect(transport);
     } else {
       const errorMsg = sessionIdFromHeader

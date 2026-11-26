@@ -278,6 +278,24 @@ test('--json-response without --stateless is refused at startup', () => {
   );
 });
 
+// index.ts loads .env after this module is imported, so the variable must be read
+// when a transport starts, not when the module is evaluated.
+test('ARGOCD_EXTRA_HEADERS set after import is read when a transport starts', () => {
+  const previous = process.env.ARGOCD_EXTRA_HEADERS;
+  process.env.ARGOCD_EXTRA_HEADERS = 'not json';
+  try {
+    for (const connect of [connectHttpTransport, connectSSETransport]) {
+      assert.throws(
+        () => connect({ port: 0, authToken: INBOUND_TOKEN }),
+        /ARGOCD_EXTRA_HEADERS must be valid JSON/
+      );
+    }
+  } finally {
+    if (previous !== undefined) process.env.ARGOCD_EXTRA_HEADERS = previous;
+    else delete process.env.ARGOCD_EXTRA_HEADERS;
+  }
+});
+
 test('an absent or empty Host header is rejected, not treated as an allowed name', async () => {
   const { port, close } = await startTransport(connectHttpTransport);
   try {
