@@ -12,6 +12,7 @@ import {
   V1alpha1AppProject
 } from '../types/argocd-types.js';
 import { HttpClient } from './http.js';
+import { encodePathSegment } from './url.js';
 
 export class ArgoCDClient {
   private baseUrl: string;
@@ -26,7 +27,7 @@ export class ArgoCDClient {
 
   public async listApplications(params?: { search?: string; limit?: number; offset?: number }) {
     const { body } = await this.client.get<V1alpha1ApplicationList>(
-      `/api/v1/applications`,
+      'api/v1/applications',
       params?.search ? { search: params.search } : undefined
     );
 
@@ -73,7 +74,7 @@ export class ArgoCDClient {
     if (params?.name) queryParams.name = params.name;
 
     const { body } = await this.client.get<V1alpha1ClusterList>(
-      `/api/v1/clusters`,
+      'api/v1/clusters',
       Object.keys(queryParams).length > 0 ? queryParams : undefined
     );
 
@@ -81,22 +82,24 @@ export class ArgoCDClient {
   }
 
   public async getApplication(applicationName: string, appNamespace?: string) {
+    const appSeg = encodePathSegment(applicationName, 'applicationName');
     const queryParams = appNamespace ? { appNamespace } : undefined;
     const { body } = await this.client.get<V1alpha1Application>(
-      `/api/v1/applications/${applicationName}`,
+      `api/v1/applications/${appSeg}`,
       queryParams
     );
     return body;
   }
 
   public async getAppProject(projectName: string) {
-    const { body } = await this.client.get<V1alpha1AppProject>(`/api/v1/projects/${projectName}`);
+    const projectSeg = encodePathSegment(projectName, 'projectName');
+    const { body } = await this.client.get<V1alpha1AppProject>(`api/v1/projects/${projectSeg}`);
     return body;
   }
 
   public async createApplication(application: V1alpha1Application) {
     const { body } = await this.client.post<V1alpha1Application, V1alpha1Application>(
-      `/api/v1/applications`,
+      'api/v1/applications',
       null,
       application
     );
@@ -104,8 +107,9 @@ export class ArgoCDClient {
   }
 
   public async updateApplication(applicationName: string, application: V1alpha1Application) {
+    const appSeg = encodePathSegment(applicationName, 'applicationName');
     const { body } = await this.client.put<V1alpha1Application, V1alpha1Application>(
-      `/api/v1/applications/${applicationName}`,
+      `api/v1/applications/${appSeg}`,
       null,
       application
     );
@@ -120,6 +124,7 @@ export class ArgoCDClient {
       propagationPolicy?: string;
     }
   ) {
+    const appSeg = encodePathSegment(applicationName, 'applicationName');
     const queryParams: Record<string, string | boolean> = {};
 
     if (options?.appNamespace) {
@@ -133,8 +138,9 @@ export class ArgoCDClient {
     }
 
     const { body } = await this.client.delete<V1alpha1Application>(
-      `/api/v1/applications/${applicationName}`,
-      Object.keys(queryParams).length > 0 ? queryParams : undefined
+      `api/v1/applications/${appSeg}`,
+      Object.keys(queryParams).length > 0 ? queryParams : undefined,
+      { allowEmptyBody: true }
     );
     return body;
   }
@@ -149,6 +155,7 @@ export class ArgoCDClient {
       syncOptions?: string[];
     }
   ) {
+    const appSeg = encodePathSegment(applicationName, 'applicationName');
     const syncRequest: Record<string, string | boolean | string[]> = {};
 
     if (options?.appNamespace) {
@@ -168,7 +175,7 @@ export class ArgoCDClient {
     }
 
     const { body } = await this.client.post<V1alpha1Application, V1alpha1Application>(
-      `/api/v1/applications/${applicationName}/sync`,
+      `api/v1/applications/${appSeg}/sync`,
       null,
       Object.keys(syncRequest).length > 0 ? syncRequest : undefined
     );
@@ -176,9 +183,10 @@ export class ArgoCDClient {
   }
 
   public async getApplicationResourceTree(applicationName: string, appNamespace?: string) {
+    const appSeg = encodePathSegment(applicationName, 'applicationName');
     const queryParams = appNamespace ? { appNamespace } : undefined;
     const { body } = await this.client.get<V1alpha1ApplicationTree>(
-      `/api/v1/applications/${applicationName}/resource-tree`,
+      `api/v1/applications/${appSeg}/resource-tree`,
       queryParams
     );
     return body;
@@ -196,22 +204,26 @@ export class ArgoCDClient {
       project?: string;
     }
   ) {
+    const appSeg = encodePathSegment(applicationName, 'applicationName');
     const { body } = await this.client.get<{ items: V1alpha1ResourceDiff[] }>(
-      `/api/v1/applications/${applicationName}/managed-resources`,
+      `api/v1/applications/${appSeg}/managed-resources`,
       filters
     );
     return body;
   }
 
   public async getApplicationLogs(applicationName: string) {
+    const appSeg = encodePathSegment(applicationName, 'applicationName');
     const logs: ApplicationLogEntry[] = [];
     await this.client.getStream<ApplicationLogEntry>(
-      `/api/v1/applications/${applicationName}/logs`,
+      `api/v1/applications/${appSeg}/logs`,
       {
         follow: false,
         tailLines: 100
       },
-      (chunk) => logs.push(chunk)
+      (chunk) => {
+        logs.push(chunk);
+      }
     );
     return logs;
   }
@@ -222,9 +234,10 @@ export class ArgoCDClient {
     resourceRef: V1alpha1ResourceResult,
     container: string
   ) {
+    const appSeg = encodePathSegment(applicationName, 'applicationName');
     const logs: ApplicationLogEntry[] = [];
     await this.client.getStream<ApplicationLogEntry>(
-      `/api/v1/applications/${applicationName}/logs`,
+      `api/v1/applications/${appSeg}/logs`,
       {
         appNamespace: applicationNamespace,
         namespace: resourceRef.namespace,
@@ -236,28 +249,35 @@ export class ArgoCDClient {
         tailLines: 100,
         container: container
       },
-      (chunk) => logs.push(chunk)
+      (chunk) => {
+        logs.push(chunk);
+      }
     );
     return logs;
   }
 
   public async getPodLogs(applicationName: string, podName: string) {
+    const appSeg = encodePathSegment(applicationName, 'applicationName');
+    const podSeg = encodePathSegment(podName, 'podName');
     const logs: ApplicationLogEntry[] = [];
     await this.client.getStream<ApplicationLogEntry>(
-      `/api/v1/applications/${applicationName}/pods/${podName}/logs`,
+      `api/v1/applications/${appSeg}/pods/${podSeg}/logs`,
       {
         follow: false,
         tailLines: 100
       },
-      (chunk) => logs.push(chunk)
+      (chunk) => {
+        logs.push(chunk);
+      }
     );
     return logs;
   }
 
   public async getApplicationEvents(applicationName: string, appNamespace?: string) {
+    const appSeg = encodePathSegment(applicationName, 'applicationName');
     const queryParams = appNamespace ? { appNamespace } : undefined;
     const { body } = await this.client.get<V1EventList>(
-      `/api/v1/applications/${applicationName}/events`,
+      `api/v1/applications/${appSeg}/events`,
       queryParams
     );
     return body;
@@ -268,8 +288,9 @@ export class ArgoCDClient {
     applicationNamespace: string,
     resourceRef: V1alpha1ResourceResult
   ) {
+    const appSeg = encodePathSegment(applicationName, 'applicationName');
     const { body } = await this.client.get<V1alpha1ApplicationResourceResult>(
-      `/api/v1/applications/${applicationName}/resource`,
+      `api/v1/applications/${appSeg}/resource`,
       {
         appNamespace: applicationNamespace,
         namespace: resourceRef.namespace,
@@ -289,15 +310,13 @@ export class ArgoCDClient {
     resourceNamespace: string,
     resourceName: string
   ) {
-    const { body } = await this.client.get<V1EventList>(
-      `/api/v1/applications/${applicationName}/events`,
-      {
-        appNamespace: applicationNamespace,
-        resourceNamespace,
-        resourceUID,
-        resourceName
-      }
-    );
+    const appSeg = encodePathSegment(applicationName, 'applicationName');
+    const { body } = await this.client.get<V1EventList>(`api/v1/applications/${appSeg}/events`, {
+      appNamespace: applicationNamespace,
+      resourceNamespace,
+      resourceUID,
+      resourceName
+    });
     return body;
   }
 
@@ -306,8 +325,9 @@ export class ArgoCDClient {
     applicationNamespace: string,
     resourceRef: V1alpha1ResourceResult
   ) {
+    const appSeg = encodePathSegment(applicationName, 'applicationName');
     const { body } = await this.client.get<{ actions: V1alpha1ResourceAction[] }>(
-      `/api/v1/applications/${applicationName}/resource/actions`,
+      `api/v1/applications/${appSeg}/resource/actions`,
       {
         appNamespace: applicationNamespace,
         namespace: resourceRef.namespace,
@@ -326,8 +346,9 @@ export class ArgoCDClient {
     resourceRef: V1alpha1ResourceResult,
     action: string
   ) {
+    const appSeg = encodePathSegment(applicationName, 'applicationName');
     const { body } = await this.client.post<string, V1alpha1Application>(
-      `/api/v1/applications/${applicationName}/resource/actions`,
+      `api/v1/applications/${appSeg}/resource/actions`,
       {
         appNamespace: applicationNamespace,
         namespace: resourceRef.namespace,
@@ -336,7 +357,8 @@ export class ArgoCDClient {
         kind: resourceRef.kind,
         version: resourceRef.version
       },
-      action
+      action,
+      { allowEmptyBody: true }
     );
     return body;
   }
