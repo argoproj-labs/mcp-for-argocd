@@ -4,20 +4,124 @@ export interface HttpResponse<T> {
   body: T;
 }
 
+// A non-2xx answer from ArgoCD. Thrown rather than returned, so a refused call
+// reaches the tool caller as an error instead of as an empty result.
+export class HttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string
+  ) {
+    super(message);
+    this.name = 'HttpError';
+  }
+
+  static async from(response: Response): Promise<HttpError> {
+    let detail: string | undefined;
+    try {
+      const body = (await response.json()) as { message?: unknown; error?: unknown };
+      const text = typeof body?.message === 'string' ? body.message : body?.error;
+      if (typeof text === 'string' && text.trim()) detail = text.trim().slice(0, 500);
+    } catch {
+      // Not JSON (a proxy's HTML error page, an empty body): the status says enough.
+    }
+    return new HttpError(
+      response.status,
+      `ArgoCD answered ${response.status}${response.statusText ? ` ${response.statusText}` : ''}` +
+        (detail ? `: ${detail}` : '')
+    );
+  }
+}
+
+// Kubernetes object names (Application, AppProject and Pod names among them)
+// are DNS-1123 subdomains: lowercase letters, digits, '-' and '.', every
+// dot-separated label starting and ending with a letter or digit, and at most
+// 253 characters.
+const K8S_NAME = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+const K8S_NAME_MAX_LENGTH = 253;
+
+// A caller-supplied name (an application, a project, a pod) as one URL path
+// segment. Only a valid Kubernetes object name is accepted, so the name can hold
+// no '/', '%', '\' or '.'/'..' segment. Encoding alone is not enough: absUrl's
+// prefix check sees '%2F', but a proxy in front of ArgoCD (nginx, for one) can
+// decode it and resolve '..' before routing, sending the request and its token
+// to another backend on the same host. The name is still encoded as a second
+// layer, which leaves a valid name unchanged.
+export const pathSegment = (value: string): string => {
+  if (value.length > K8S_NAME_MAX_LENGTH || !K8S_NAME.test(value)) {
+    throw new Error(
+      `Invalid name ${JSON.stringify(value)}: it is not a Kubernetes object name ` +
+        `(lowercase letters, digits, '-' and '.'), so it cannot be used in a URL path.`
+    );
+  }
+  return encodeURIComponent(value);
+};
+
 type SearchParams = Record<string, string | number | boolean | undefined | null> | null;
+
+export type HttpClientOptions = {
+  // Called once when ArgoCD answers 401, for a token to retry the request with.
+  // Used for short-lived tokens obtained by token exchange: a cached one can be
+  // rejected (clock skew, key rotation) while still within its own lifetime.
+  // It receives the token ArgoCD rejected.
+  onUnauthorized?: (rejectedToken: string) => Promise<string | undefined>;
+};
 
 export class HttpClient {
   public readonly baseUrl: string;
-  public readonly apiToken: string;
-  public readonly headers: Record<string, string>;
+  // Not readonly: replaced by the one retry after a 401.
+  public apiToken: string;
+  private readonly onUnauthorized?: (rejectedToken: string) => Promise<string | undefined>;
 
-  constructor(baseUrl: string, apiToken: string) {
+  constructor(baseUrl: string, apiToken: string, options: HttpClientOptions = {}) {
     this.baseUrl = baseUrl;
     this.apiToken = apiToken;
-    this.headers = {
+    this.onUnauthorized = options.onUnauthorized;
+  }
+
+  public get headers(): Record<string, string> {
+    return {
       Authorization: `Bearer ${this.apiToken}`,
       'Content-Type': 'application/json'
     };
+  }
+
+  private async send(url: URL, init?: RequestInit): Promise<Response> {
+    // No redirects: fetch keeps Authorization on a same-origin redirect, which
+    // could carry the token to another backend behind the same host. ArgoCD's API
+    // answers directly.
+    const attempt = async () => {
+      try {
+        return await fetch(url, {
+          ...init,
+          redirect: 'error',
+          headers: { ...init?.headers, ...this.headers }
+        });
+      } catch (error) {
+        const cause = (error as { cause?: { message?: unknown } } | undefined)?.cause;
+        if (typeof cause?.message === 'string' && cause.message.includes('redirect')) {
+          throw new Error(
+            'ArgoCD answered with a redirect, which is not followed. Check ARGOCD_BASE_URL ' +
+              '(scheme, host and path prefix).'
+          );
+        }
+        throw error;
+      }
+    };
+    const response = await attempt();
+    if (response.status !== 401 || !this.onUnauthorized) return response;
+    let fresh: string | undefined;
+    try {
+      fresh = await this.onUnauthorized(this.apiToken);
+    } catch (error) {
+      // The replacement could not be obtained (e.g. the exchange was refused); that
+      // error says more than ArgoCD's 401 does.
+      await response.body?.cancel();
+      throw error;
+    }
+    if (!fresh || fresh === this.apiToken) return response;
+    await response.body?.cancel();
+    this.apiToken = fresh;
+    return attempt();
   }
 
   private async request<R>(
@@ -31,10 +135,8 @@ export class HttpClient {
         urlObject.searchParams.set(key, value?.toString() || '');
       });
     }
-    const response = await fetch(urlObject, {
-      ...init,
-      headers: { ...init?.headers, ...this.headers }
-    });
+    const response = await this.send(urlObject, init);
+    if (!response.ok) throw await HttpError.from(response);
     const body = await response.json();
     return {
       status: response.status,
@@ -55,10 +157,8 @@ export class HttpClient {
         urlObject.searchParams.set(key, value?.toString() || '');
       });
     }
-    const response = await fetch(urlObject, {
-      ...init,
-      headers: { ...init?.headers, ...this.headers }
-    });
+    const response = await this.send(urlObject, init);
+    if (!response.ok) throw await HttpError.from(response);
     const reader = response.body?.getReader();
     if (!reader) {
       throw new Error('response body is not readable');
@@ -83,11 +183,22 @@ export class HttpClient {
     }
   }
 
+  // Resolved under the base URL's path, so ArgoCD served under a prefix
+  // (https://host/argocd) gets /argocd/api/v1/..., not /api/v1/... on whatever
+  // else shares the host. Whatever the path, the result must stay under the base
+  // URL: the token is attached to every request.
   absUrl(url: string): URL {
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      return new URL(url);
+    const base = new URL(this.baseUrl);
+    base.search = '';
+    base.hash = '';
+    if (!base.pathname.endsWith('/')) base.pathname += '/';
+    const resolved = /^https?:\/\//.test(url)
+      ? new URL(url)
+      : new URL(url.replace(/^\/+/, ''), base);
+    if (resolved.origin !== base.origin || !resolved.pathname.startsWith(base.pathname)) {
+      throw new Error('Refusing to send the ArgoCD token outside ARGOCD_BASE_URL.');
     }
-    return new URL(url, this.baseUrl);
+    return resolved;
   }
 
   async get<R>(url: string, params?: SearchParams): Promise<HttpResponse<R>> {

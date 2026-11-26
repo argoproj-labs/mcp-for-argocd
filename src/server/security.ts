@@ -2,6 +2,8 @@ import express from 'express';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import net from 'node:net';
 import { hostHeaderValidation } from '@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js';
+import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
+import type { OAuthTokenVerifier } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import { logger } from '../logging/logging.js';
 
 // Loopback names, in the bracketed form the Host header and the SDK's
@@ -236,12 +238,21 @@ export const bearerAuth = (expectedToken: string): express.RequestHandler => {
   };
 };
 
+// OAuth resource-server mode (see oauth.ts): every request must carry an access
+// token the verifier accepts, and a rejection points the client at the metadata
+// that names the authorization server.
+export type ListenerOAuth = {
+  verifier: OAuthTokenVerifier;
+  resourceMetadataUrl: string;
+};
+
 export type ListenerSecurity = {
   // Bind address in the bare form net.listen() accepts.
   bindAddress: string;
   allowedHostnames: string[];
   allowedOrigins: string[];
   authToken?: string;
+  oauth?: ListenerOAuth;
   // Host validation only makes sense for a loopback bind or an operator-supplied
   // allow list. On an exposed bind with no list, the name clients legitimately
   // use is unknown.
@@ -255,6 +266,7 @@ export type ListenerSecurityOptions = {
   allowedOrigins?: string[];
   authToken?: string;
   allowUnauthenticated?: boolean;
+  oauth?: ListenerOAuth;
 };
 
 // Validate a listener's exposure before anything binds a socket. Throws rather
@@ -283,12 +295,26 @@ export const resolveListenerSecurity = (options: ListenerSecurityOptions): Liste
     );
   }
 
-  if (!isLoopbackAddress(bindAddress) && !authToken && !options.allowUnauthenticated) {
+  // Both read the Authorization header, so only one can be the inbound credential.
+  if (authToken && options.oauth) {
+    throw new Error(
+      'MCP_AUTH_TOKEN and OAuth (MCP_OAUTH_ISSUER) both authenticate the Authorization header. ' +
+        'Configure one of them.'
+    );
+  }
+
+  if (
+    !isLoopbackAddress(bindAddress) &&
+    !authToken &&
+    !options.oauth &&
+    !options.allowUnauthenticated
+  ) {
     throw new Error(
       `Refusing to bind to ${bindAddress} without inbound authentication. The MCP listener exposes ` +
         'every ArgoCD tool to anything that can reach it, and ARGOCD_API_TOKEN authenticates ' +
         'this server to ArgoCD, not the caller. Either set MCP_AUTH_TOKEN to require an inbound ' +
-        '"Authorization: Bearer <token>" header, or pass --allow-unauthenticated if the listener ' +
+        '"Authorization: Bearer <token>" header, enable OAuth (MCP_OAUTH_ISSUER, http transport) ' +
+        "to require each user's own access token, or pass --allow-unauthenticated if the listener " +
         'is already protected by an external layer (a sidecar proxy, service mesh, or network ' +
         `policy). To listen locally only, set --bind-address to ${DEFAULT_BIND_ADDRESS}.`
     );
@@ -299,6 +325,7 @@ export const resolveListenerSecurity = (options: ListenerSecurityOptions): Liste
     allowedHostnames: resolveAllowedHostnames(bindAddress, options.allowedHostHeaders),
     allowedOrigins: resolveAllowedOrigins(options.port, options.allowedOrigins),
     authToken,
+    oauth: options.oauth,
     validateHostHeader:
       isLoopbackAddress(bindAddress) || (options.allowedHostHeaders?.length ?? 0) > 0
   };
@@ -311,7 +338,16 @@ export const applyListenerSecurity = (app: express.Express, security: ListenerSe
   // The credential runs first. Last, it would answer 403 for a Host or Origin
   // outside the allow list and 401 for one inside it, which is enough to
   // enumerate the allow lists without presenting a token.
-  if (security.authToken) app.use(bearerAuth(security.authToken));
+  if (security.oauth) {
+    app.use(
+      requireBearerAuth({
+        verifier: security.oauth.verifier,
+        resourceMetadataUrl: security.oauth.resourceMetadataUrl
+      })
+    );
+  } else if (security.authToken) {
+    app.use(bearerAuth(security.authToken));
+  }
   if (security.validateHostHeader) {
     app.use(hostHeaderValidation(security.allowedHostnames));
   } else {
@@ -329,7 +365,7 @@ export const applyListenerSecurity = (app: express.Express, security: ListenerSe
 // legitimate behind a proxy or mesh, but an operator who later removes that layer
 // has nothing else to remind them.
 const warnIfUnauthenticatedAndExposed = (security: ListenerSecurity): void => {
-  if (security.authToken || isLoopbackAddress(security.bindAddress)) return;
+  if (security.authToken || security.oauth || isLoopbackAddress(security.bindAddress)) return;
   logger.warn(
     `The listener binds ${security.bindAddress} with no inbound authentication (--allow-unauthenticated). ` +
       'Every ArgoCD tool, including create/update/delete/sync_application and ' +

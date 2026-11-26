@@ -1,4 +1,5 @@
 import { McpServer, ToolCallback } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 
 import packageJSON from '../../package.json' with { type: 'json' };
 import { ArgoCDClient } from '../argocd/client.js';
@@ -10,6 +11,9 @@ import {
   ResourceRefSchema
 } from '../shared/models/schema.js';
 import { TokenRegistry, tokenRegistryFromEnv } from './tokenRegistry.js';
+import type { TokenExchanger } from '../argocd/tokenExchange.js';
+import { userOf } from './oauth.js';
+import { logger } from '../logging/logging.js';
 
 type ServerInfo = {
   argocdBaseUrl: string;
@@ -17,6 +21,9 @@ type ServerInfo = {
   // Optional registry mapping additional ArgoCD base URLs to their tokens. When
   // omitted, it is loaded from the ARGOCD_TOKEN_REGISTRY_PATH env var.
   tokenRegistry?: TokenRegistry;
+  // OAuth mode: each call runs as the user whose token the request carried,
+  // exchanged for an ArgoCD token. No static token or registry is used.
+  tokenExchanger?: TokenExchanger;
 };
 
 // Per-call argument that any tool may accept to target a specific ArgoCD
@@ -44,6 +51,7 @@ export class Server extends McpServer {
   private defaultBaseUrl: string;
   private defaultApiToken: string;
   private tokenRegistry: TokenRegistry;
+  private tokenExchanger?: TokenExchanger;
   private argocdClient: ArgoCDClient;
   // Cache per-credential clients to avoid rebuilding the HttpClient on every
   // call. Keyed by baseUrl + token, since the same base URL may resolve to
@@ -57,7 +65,12 @@ export class Server extends McpServer {
     });
     this.defaultBaseUrl = serverInfo.argocdBaseUrl;
     this.defaultApiToken = serverInfo.argocdApiToken;
-    this.tokenRegistry = serverInfo.tokenRegistry ?? tokenRegistryFromEnv();
+    this.tokenExchanger = serverInfo.tokenExchanger;
+    // In OAuth mode the registry stays empty: startup refuses
+    // ARGOCD_TOKEN_REGISTRY_PATH alongside it, and resolveClient never reads it.
+    this.tokenRegistry =
+      serverInfo.tokenRegistry ??
+      (this.tokenExchanger ? new TokenRegistry() : tokenRegistryFromEnv());
     this.argocdClient = new ArgoCDClient(serverInfo.argocdBaseUrl, serverInfo.argocdApiToken);
 
     const isReadOnly =
@@ -401,6 +414,46 @@ export class Server extends McpServer {
   // This lets a single server target multiple ArgoCD instances, each with its
   // own token, without the token ever appearing in a tool-call payload: callers
   // pass only the (non-secret) base URL and the server pairs it with the token.
+  // OAuth mode: the caller's token, validated by the bearer middleware, exchanged
+  // for an ArgoCD token. Only ever for the configured base URL: a caller-supplied
+  // one would let a prompt-injected model send the user's identity elsewhere.
+  private async resolveUserClient(
+    args: ArgoCDArgs,
+    authInfo: AuthInfo | undefined,
+    exchanger: TokenExchanger
+  ): Promise<ArgoCDClient> {
+    if (
+      args.argocdBaseUrl &&
+      TokenRegistry.normalize(args.argocdBaseUrl) !== TokenRegistry.normalize(this.defaultBaseUrl)
+    ) {
+      throw new Error(
+        `argocdBaseUrl "${args.argocdBaseUrl}" is not allowed: this server calls ArgoCD as the ` +
+          `signed-in user, and only at ${this.defaultBaseUrl}.`
+      );
+    }
+    if (!authInfo?.token) {
+      // The bearer middleware runs before every MCP request, so this means the
+      // tool was reached some other way. Fail rather than call ArgoCD anonymously.
+      throw new Error('No authenticated user on this request.');
+    }
+    const subjectToken = authInfo.token;
+    const user = userOf(authInfo) ?? 'unknown user';
+    const argocdToken = await exchanger.getToken(subjectToken, user);
+    return new ArgoCDClient(this.defaultBaseUrl, argocdToken, {
+      onUnauthorized: async (rejectedToken) => {
+        exchanger.invalidate(subjectToken, rejectedToken);
+        return exchanger.getToken(subjectToken, user);
+      }
+    });
+  }
+
+  private async clientFor(args: ArgoCDArgs, authInfo: AuthInfo | undefined) {
+    if (this.tokenExchanger) {
+      return this.resolveUserClient(args, authInfo, this.tokenExchanger);
+    }
+    return this.resolveClient(args);
+  }
+
   private resolveClient(args: ArgoCDArgs): ArgoCDClient {
     const baseUrl = args.argocdBaseUrl || this.defaultBaseUrl;
 
@@ -473,7 +526,13 @@ export class Server extends McpServer {
         ];
         // Strip credential args before handing the rest to the tool callback.
         const { argocdBaseUrl, ...toolArgs } = allArgs;
-        const client = this.resolveClient({ argocdBaseUrl });
+        // OAuth mode: the MCP side's own record of who called what. The arguments
+        // are left out: they are the caller's, and ArgoCD's audit log has the effect.
+        if (this.tokenExchanger) {
+          const user = userOf(extra?.authInfo) ?? 'unknown user';
+          logger.info({ user, tool: name }, `Tool ${name} called by ${user}`);
+        }
+        const client = await this.clientFor({ argocdBaseUrl }, extra?.authInfo);
         const result = await cb.call(
           this,
           toolArgs as Parameters<ToolCallback<Args>>[0],
