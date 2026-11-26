@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import { tokenRegistryFromEnv } from './tokenRegistry.js';
+import { TokenRegistry, tokenRegistryFromEnv } from './tokenRegistry.js';
 import { login } from '../argocd/http.js';
 import {
   applyListenerSecurity,
@@ -84,6 +84,27 @@ const resolveApiToken = async (
   return login(argocdBaseUrl, username, password);
 };
 
+// The env username/password belong to ARGOCD_BASE_URL: never pair them with a
+// header-supplied base URL (the password would be sent to the caller's host) or
+// mix them with a header username/password.
+export const loginCredentials = (
+  headers: Record<string, string | string[] | undefined>,
+  env: NodeJS.ProcessEnv = process.env
+): { username: string; password: string } => {
+  const headerBaseUrl = headers['x-argocd-base-url'] as string | undefined;
+  const headerUsername = headers['x-argocd-username'] as string | undefined;
+  const headerPassword = headers['x-argocd-password'] as string | undefined;
+  const useEnv =
+    !headerUsername &&
+    !headerPassword &&
+    (!headerBaseUrl ||
+      TokenRegistry.normalize(headerBaseUrl) ===
+        TokenRegistry.normalize(env.ARGOCD_BASE_URL || ''));
+  return useEnv
+    ? { username: env.ARGOCD_USERNAME || '', password: env.ARGOCD_PASSWORD || '' }
+    : { username: headerUsername || '', password: headerPassword || '' };
+};
+
 // Resolve the session-level ArgoCD credentials from headers or env.
 //
 // The API token is only ever accepted here (x-argocd-api-token header or
@@ -112,10 +133,7 @@ const resolveCredentials = async (
   let argocdApiToken =
     (req.headers['x-argocd-api-token'] as string) || process.env.ARGOCD_API_TOKEN || '';
 
-  const username =
-    (req.headers['x-argocd-username'] as string) || process.env.ARGOCD_USERNAME || '';
-  const password =
-    (req.headers['x-argocd-password'] as string) || process.env.ARGOCD_PASSWORD || '';
+  const { username, password } = loginCredentials(req.headers);
   try {
     argocdApiToken = await resolveApiToken(argocdBaseUrl, argocdApiToken, username, password);
   } catch (error) {

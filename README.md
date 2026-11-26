@@ -174,6 +174,8 @@ If you don't have (or don't want to use) an API token, supply a username and pas
 
 This requires a base URL to be known at connect time (`x-argocd-base-url` header or `ARGOCD_BASE_URL` env var) — the login request has to go somewhere. The resulting session token is used exactly like `ARGOCD_API_TOKEN` for the rest of the session, and is **not refreshed**: ArgoCD's session tokens expire (24h by default), so a session that outlives that window needs a fresh connection. An API token, when present, always takes priority over username/password.
 
+The env `ARGOCD_USERNAME` / `ARGOCD_PASSWORD` are only used with the env `ARGOCD_BASE_URL`: when a client sends an `x-argocd-base-url` for another host, or its own `x-argocd-username` / `x-argocd-password`, the env pair is ignored, so the password is never sent to a caller-chosen host. Login requires an `https://` base URL and does not follow redirects.
+
 #### Base URL — header / env var, or per-call argument
 
 The base URL may be supplied at the session level (resolved once when the server starts or when an HTTP client connects):

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo, Server } from 'node:net';
-import { connectHttpTransport, connectSSETransport } from './transport.js';
+import { connectHttpTransport, connectSSETransport, loginCredentials } from './transport.js';
 
 // These boot the real transports. The security tests build their own Express app,
 // so they pin what applyListenerSecurity does but not that each transport calls
@@ -214,4 +214,19 @@ test('an absent or empty Host header is rejected, not treated as an allowed name
   } finally {
     await close();
   }
+});
+
+test('env username/password are never paired with a header base URL or header username', () => {
+  const env = { ARGOCD_BASE_URL: 'https://argo', ARGOCD_USERNAME: 'admin', ARGOCD_PASSWORD: 'pw' };
+  const none = { username: '', password: '' };
+  assert.deepEqual(loginCredentials({}, env), { username: 'admin', password: 'pw' });
+  assert.deepEqual(loginCredentials({ 'x-argocd-base-url': 'https://argo/' }, env), {
+    username: 'admin',
+    password: 'pw'
+  });
+  assert.deepEqual(loginCredentials({ 'x-argocd-base-url': 'https://evil' }, env), none);
+  assert.deepEqual(loginCredentials({ 'x-argocd-username': 'bob' }, env), {
+    username: 'bob',
+    password: ''
+  });
 });

@@ -7,8 +7,14 @@ export const login = async (
   username: string,
   password: string
 ): Promise<string> => {
-  const response = await fetch(new URL('/api/v1/session', baseUrl), {
+  const url = new URL('/api/v1/session', baseUrl);
+  if (url.protocol !== 'https:') {
+    throw new Error('ArgoCD username/password login requires an https:// base URL');
+  }
+  const response = await fetch(url, {
     method: 'POST',
+    // Never resend the password body to wherever a redirect points.
+    redirect: 'error',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password })
   });
