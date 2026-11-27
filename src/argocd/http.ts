@@ -8,7 +8,7 @@ type SearchParams = Record<string, string | number | boolean | undefined | null>
 
 export class HttpClient {
   public readonly baseUrl: string;
-  public readonly apiToken: string;
+  private apiToken: string;
   public readonly headers: Record<string, string>;
 
   constructor(baseUrl: string, apiToken: string) {
@@ -18,6 +18,11 @@ export class HttpClient {
       Authorization: `Bearer ${this.apiToken}`,
       'Content-Type': 'application/json'
     };
+  }
+
+  public updateToken(newToken: string): void {
+    this.apiToken = newToken;
+    this.headers['Authorization'] = `Bearer ${newToken}`;
   }
 
   private async request<R>(

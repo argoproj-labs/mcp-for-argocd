@@ -12,6 +12,7 @@ import {
   V1alpha1AppProject
 } from '../types/argocd-types.js';
 import { HttpClient } from './http.js';
+import { decodeJwtPayload } from './jwt.js';
 
 export class ArgoCDClient {
   private baseUrl: string;
@@ -22,6 +23,11 @@ export class ArgoCDClient {
     this.baseUrl = baseUrl;
     this.apiToken = apiToken;
     this.client = new HttpClient(this.baseUrl, this.apiToken);
+  }
+
+  public updateToken(newToken: string): void {
+    this.apiToken = newToken;
+    this.client.updateToken(newToken);
   }
 
   public async listApplications(params?: { search?: string; limit?: number; offset?: number }) {
@@ -92,6 +98,15 @@ export class ArgoCDClient {
   public async getAppProject(projectName: string) {
     const { body } = await this.client.get<V1alpha1AppProject>(`/api/v1/projects/${projectName}`);
     return body;
+  }
+
+  public async getSessionInfo() {
+    const { body } = await this.client.get<Record<string, unknown>>('/api/v1/session/userinfo');
+    const exp = decodeJwtPayload(this.apiToken)?.exp;
+    return {
+      ...body,
+      tokenExpiresInSeconds: exp !== undefined ? Math.round(exp - Date.now() / 1000) : undefined
+    };
   }
 
   public async createApplication(application: V1alpha1Application) {
